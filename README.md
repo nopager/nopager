@@ -6,6 +6,8 @@ NoPager is an open-source, agentless, BYOK AI on-call engineer for small product
 
 The v0.1 Alpha supports one self-hosted administrator, one protected web app, GitHub, Vercel, and one OpenAI, Anthropic, or Gemini API key.
 
+> **Design Partner Alpha:** the project is intentionally scope-frozen around proving one safe GitHub → Vercel repair loop with real production-like incidents. See [the Alpha acceptance plan](docs/DESIGN_PARTNER_ALPHA.md). This is not yet a claim of broad production readiness.
+
 ## Quick start
 
 Requirements: Docker Engine 26 or newer with Compose v2 and a public HTTPS production health URL. Engine 26 introduced the volume-subpath mount used to expose only one incident workspace to a repair container.
@@ -40,7 +42,7 @@ The API is available at `http://localhost:8080`; `/healthz` reports process heal
 
 Safe Mode is the default. NoPager may diagnose, repair, build, test, open a PR, deploy a Preview, and verify it automatically; a production promotion waits for explicit administrator approval.
 
-Autopilot is experimental and only permits low-risk, verified, reversible promotion. High-risk changes—including dependency manifests, database schema, IAM, DNS, billing, and secrets—are escalated. The Kill Switch pauses mutations while retaining read-only health monitoring and evidence collection.
+Autopilot is experimental and only permits low-risk, verified, reversible promotion. A missing or failed Preview verification is a hard production block, not something that human approval can bypass. High-risk changes—including dependency manifests, database schema, IAM, DNS, billing, and secrets—are escalated. The Kill Switch pauses mutations while retaining read-only health monitoring and evidence collection.
 
 Repair execution uses a non-root, resource-limited, capability-dropped Docker container with a read-only root filesystem. Network access is disabled for build and test and is enabled only for recognized dependency-fetch commands. The trusted worker needs access to the Docker daemon; repair containers never receive the daemon socket or service credentials.
 
@@ -96,11 +98,17 @@ Configure the GitHub App webhook to `/api/v1/integrations/github/webhook` and th
 
 [`examples/demo-next-app`](examples/demo-next-app) is a deliberately breakable Next.js target for the public Alpha demonstration. It provides a healthy endpoint, deterministic runtime 500, health-check and recent-regression modes, and a deterministic deployment build failure. Its README documents how to inject and restore each scenario before exercising the GitHub → Vercel repair loop.
 
+For design-partner validation, use:
+
+- [Design Partner Alpha acceptance plan](docs/DESIGN_PARTNER_ALPHA.md)
+- [60–90 second demo runbook](docs/DEMO_RUNBOOK.md)
+
 ## Alpha limitations
 
 - GitHub and Vercel are the only production connectors.
 - One administrator and one protected app per OSS installation.
 - Preview verification uses HTTP health checks; browser verification is planned after Alpha.
+- GitHub/Vercel credential setup is still manual and is the largest onboarding friction item.
 - No Kubernetes, general observability backend, infrastructure provisioning, or automatic high-risk database/IAM/DNS actions.
 
 ## Security and contributions
