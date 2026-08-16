@@ -87,20 +87,18 @@ Pass criteria:
 
 ## Failure-safety matrix
 
-| Failure | Required behavior |
-| --- | --- |
-| Model proposes a high-risk action | Escalate. Do not patch or deploy. |
-| Model patch cannot be applied cleanly | Fail the attempt. Do not create a trusted Preview. |
-| Declared changed-file set differs from applied patch | Fail the attempt. |
-| Dependency manifest changes | Escalate for human review in Alpha. |
-| Build/test fails | Save validation evidence and retry with the failure context, up to the configured attempt limit. |
-| Three repair attempts fail | Escalate. Stop automatic repair. |
-| Preview deployment fails/cancels | Stop. Never permit production promotion. |
-| Preview health check fails | Hard block production promotion. |
-| Kill Switch is active | Block mutations while keeping read-only monitoring/evidence collection. |
-| No known rollback target | Never Autopilot. Require explicit approval. |
-| Production verification fails | Roll back to the latest known-good deployment and verify rollback. |
-| Rollback verification fails | Escalate immediately and keep mutations stopped. |
+- **Model proposes a high-risk action:** Escalate. Do not patch or deploy.
+- **Model patch cannot be applied cleanly:** Fail the attempt. Do not create a trusted Preview.
+- **Declared changed-file set differs from applied patch:** Fail the attempt.
+- **Dependency manifest changes:** Escalate for human review in Alpha.
+- **Build/test fails:** Save validation evidence and retry with the failure context, up to the configured attempt limit.
+- **Three repair attempts fail:** Escalate. Stop automatic repair.
+- **Preview deployment fails/cancels:** Stop. Never permit production promotion.
+- **Preview health check fails:** Hard block production promotion.
+- **Kill Switch is active:** Block mutations while keeping read-only monitoring/evidence collection.
+- **No known rollback target:** Never Autopilot. Require explicit approval.
+- **Production verification fails:** Roll back to the latest known-good deployment and verify rollback.
+- **Rollback verification fails:** Escalate immediately and keep mutations stopped.
 
 ## Setup usability gate
 
