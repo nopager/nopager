@@ -18,7 +18,7 @@ cd nopager
 sh scripts/quickstart.sh
 ```
 
-The bootstrap script creates `.env` when needed, generates random 32-byte base64 `NOPAGER_MASTER_KEY` and `NOPAGER_ADMIN_TOKEN` values, detects the Docker socket group on Linux, builds the images, starts PostgreSQL/API/Worker/Web, and waits for the API plus web console to become ready.
+The bootstrap script creates `.env` when needed, generates a random PostgreSQL password plus random 32-byte `NOPAGER_MASTER_KEY` and `NOPAGER_ADMIN_TOKEN` secrets, detects the Docker socket group on Linux, builds the images, starts PostgreSQL/API/Worker/Web, and waits for the API plus web console to become ready. Existing Alpha installs keep their existing non-empty secrets, and the bootstrap recognizes the earlier fixed PostgreSQL credential so an existing volume is not silently made unbootable during upgrade.
 
 Then open:
 
@@ -28,12 +28,15 @@ http://localhost:3000/setup
 
 The setup wizard creates the local administrator and validates GitHub, Vercel, the model provider, the production health URL, and the selected safety mode before it stores the protected app. GitHub repository ID/default branch and the canonical Vercel project metadata are discovered automatically.
 
-For the two provider integrations, follow:
+For setup and operations, see:
 
+- [Self-hosting and upgrade runbook](docs/SELF_HOSTING.md)
 - [GitHub App setup](docs/GITHUB_APP_SETUP.md)
 - [Vercel setup](docs/VERCEL_SETUP.md)
 
 The default Compose configuration binds **both** the web console and Rust API to `127.0.0.1`, so the first-admin bootstrap is not exposed to the network by default. For remote use, terminate TLS at a trusted reverse proxy and expose the web console deliberately; keep port 8080 private. Set `NOPAGER_WEB_BIND=0.0.0.0` only when your reverse-proxy/network topology requires a non-loopback host bind, and set `NOPAGER_COOKIE_SECURE=true` whenever the console is served through HTTPS.
+
+Console API responses are marked `private, no-store`; cross-origin browser mutations are rejected. The self-hosting runbook also calls out reverse-proxy rate limiting for login/bootstrap endpoints and the requirement to preserve the public `Host` header.
 
 Local process checks remain available on the host at `http://127.0.0.1:8080/healthz` and `/readyz`.
 
@@ -53,7 +56,7 @@ cargo run -p nopager-cli -- resume
 
 Safe Mode is the default. NoPager may diagnose, repair, build, test, open a PR, deploy a Preview, and verify it automatically; a production promotion waits for explicit administrator approval.
 
-Autopilot is experimental and only permits low-risk, verified, reversible promotion. A missing or failed Preview verification is a hard production block, not something that human approval can bypass. High-risk changes—including dependency manifests, database schema, IAM, DNS, billing, and secrets—are escalated. The Kill Switch pauses mutations while retaining read-only monitoring and evidence collection; resuming protection restarts paused incidents from fresh context instead of continuing stale mutation state.
+Autopilot is experimental and only permits low-risk, verified, reversible promotion. Enabling it in the console requires an explicit confirmation. A missing or failed Preview verification is a hard production block, not something that human approval can bypass. High-risk changes—including dependency manifests, database schema, IAM, DNS, billing, and secrets—are escalated. The Kill Switch pauses mutations while retaining read-only monitoring and evidence collection; resuming protection restarts paused incidents from fresh context instead of continuing stale mutation state.
 
 If production verification fails after a repair promotion, NoPager explicitly restores the previously recorded READY known-good Vercel deployment. It does not infer current traffic from Vercel's `target=production` field.
 
@@ -114,7 +117,7 @@ cargo run -p nopager-worker
 pnpm --filter @nopager/web dev
 ```
 
-Copy `.env.example` to `.env`; never commit the populated file. `nopager doctor` checks Docker/Compose, local configuration, and API/PostgreSQL readiness.
+Copy `.env.example` to `.env`; never commit the populated file. `nopager doctor` checks Docker/Compose, local secret configuration, and API/PostgreSQL readiness.
 
 ## Dogfood demo
 
@@ -137,6 +140,8 @@ For design-partner validation, use:
 ## Security and contributions
 
 Read [SECURITY.md](SECURITY.md) before reporting a vulnerability and [CONTRIBUTING.md](CONTRIBUTING.md) before opening a change. Never include production credentials, full logs containing secrets, or customer data in issues.
+
+Back up `.env` together with PostgreSQL. Losing `NOPAGER_MASTER_KEY` makes encrypted integration credentials unrecoverable; do not rotate it casually as a troubleshooting step.
 
 ## License
 
