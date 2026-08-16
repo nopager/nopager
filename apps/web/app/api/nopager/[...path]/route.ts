@@ -6,10 +6,26 @@ import { readBoundedBody } from "@/lib/bounded-body";
 const API_URL = process.env.NOPAGER_API_URL ?? "http://localhost:8080";
 const MAX_BODY_BYTES = 1024 * 1024;
 
+function sameOriginMutation(request: NextRequest) {
+  if (request.method === "GET" || request.method === "HEAD") return true;
+  const origin = request.headers.get("origin");
+  const host = request.headers.get("host");
+  if (!origin || !host) return false;
+  try {
+    return new URL(origin).host === host;
+  } catch {
+    return false;
+  }
+}
+
 async function proxy(
   request: NextRequest,
   context: { params: Promise<{ path: string[] }> },
 ) {
+  if (!sameOriginMutation(request)) {
+    return Response.json({ error: "cross_origin_mutation_blocked" }, { status: 403 });
+  }
+
   const { path } = await context.params;
   const target = new URL(
     `/api/v1/${path.map(encodeURIComponent).join("/")}`,
@@ -24,7 +40,7 @@ async function proxy(
   if (session) headers.set("cookie", `nopager_session=${session.value}`);
 
   let body: Uint8Array | undefined;
-  if (request.method !== "GET") {
+  if (request.method !== "GET" && request.method !== "HEAD") {
     const boundedBody = await readBoundedBody(request, MAX_BODY_BYTES);
     if (!boundedBody) {
       return Response.json({ error: "payload_too_large" }, { status: 413 });
