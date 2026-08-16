@@ -173,15 +173,25 @@ export default async function IncidentDetailPage({
 function incidentOutcome(incident: IncidentDetail) {
   switch (incident.status) {
     case "RESOLVED":
+    case "ROLLED_BACK":
       return {
-        label: incident.autonomousResolution
-          ? "Resolved autonomously"
-          : "Resolved",
-        headline: "Production is healthy again.",
+        label:
+          incident.status === "ROLLED_BACK"
+            ? "Rolled back safely"
+            : incident.autonomousResolution
+              ? "Resolved autonomously"
+              : "Resolved",
+        headline:
+          incident.status === "ROLLED_BACK"
+            ? "The previous known-good deployment was restored."
+            : "Production is healthy again.",
         message:
           incident.rootCauseSummary ??
-          "NoPager completed the repair and production verification.",
-        nextStep: "No action needed. The incident remains available for audit.",
+          (incident.status === "ROLLED_BACK"
+            ? "NoPager restored the previous known-good production deployment."
+            : "NoPager completed the repair and production verification."),
+        nextStep:
+          "No action needed. The incident remains available for audit.",
       };
     case "WAITING_APPROVAL":
       return {
@@ -192,9 +202,16 @@ function incidentOutcome(incident: IncidentDetail) {
         nextStep:
           "Review the root cause, patch, tests, and Preview below, then approve or reject the production promotion.",
       };
+    case "VERIFYING_PREVIEW":
+      return {
+        label: "Preview verification",
+        headline: "The repair is being verified before production can change.",
+        message:
+          "NoPager is checking the Vercel Preview and its health endpoint. Production remains untouched until this gate passes.",
+        nextStep: "No action needed while Preview verification is running.",
+      };
     case "PRODUCTION_DEPLOYING":
-    case "PRODUCTION_VERIFYING":
-    case "WATCHING":
+    case "VERIFYING_PRODUCTION":
       return {
         label: "Production verification",
         headline: "The verified repair is being checked in production.",
@@ -210,6 +227,14 @@ function incidentOutcome(incident: IncidentDetail) {
           "The repair did not satisfy the production safety gate, so the previous known-good deployment is being restored.",
         nextStep:
           "No new repair will be trusted until rollback verification completes.",
+      };
+    case "PAUSED":
+      return {
+        label: "Protection paused",
+        headline: "Production mutations are paused.",
+        message:
+          "NoPager will keep read-only monitoring and evidence collection active while mutation actions remain blocked.",
+        nextStep: "Resume protection only after the production risk is understood.",
       };
     case "FAILED":
     case "ESCALATED":
@@ -229,6 +254,17 @@ function incidentOutcome(incident: IncidentDetail) {
         message:
           "The incident was closed without promoting the repair to production.",
         nextStep: "Production remains on the previously approved deployment.",
+      };
+    case "IGNORED":
+    case "DUPLICATE":
+      return {
+        label: "No production action required",
+        headline: "This incident does not require another repair flow.",
+        message:
+          incident.status === "DUPLICATE"
+            ? "The signal was linked to an existing incident instead of starting duplicate remediation."
+            : "The signal was intentionally ignored by the incident workflow.",
+        nextStep: "No production mutation is scheduled from this incident.",
       };
     default:
       return {
