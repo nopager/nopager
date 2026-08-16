@@ -6,6 +6,8 @@ use thiserror::Error;
 mod http;
 pub use http::{AnthropicProvider, GeminiProvider, OpenAiProvider};
 
+pub const VERIFIED_GITHUB_DIFF_SOURCE: &str = "verified_github_diff";
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiagnosisInput {
@@ -63,6 +65,13 @@ impl DiagnosisResult {
             return Err(OutputValidationError::MissingSafetyPlan);
         }
         Ok(())
+    }
+
+    #[must_use]
+    pub fn has_verified_source_context(&self) -> bool {
+        self.evidence.iter().any(|evidence| {
+            evidence.source == VERIFIED_GITHUB_DIFF_SOURCE && !evidence.finding.trim().is_empty()
+        })
     }
 }
 
@@ -165,6 +174,8 @@ pub enum ProviderError {
     Authentication,
     #[error("model provider request failed: {0}")]
     Request(String),
+    #[error("verified source context is unavailable; refusing to invent a repair patch")]
+    InsufficientSourceContext,
     #[error("model provider returned invalid structured output: {0}")]
     InvalidOutput(#[from] OutputValidationError),
     #[error("model provider response could not be decoded")]
@@ -214,5 +225,16 @@ mod tests {
             diagnosis.validate(),
             Err(OutputValidationError::InvalidConfidence)
         );
+    }
+
+    #[test]
+    fn recognizes_only_explicit_verified_source_evidence() {
+        let mut diagnosis = valid_diagnosis();
+        assert!(!diagnosis.has_verified_source_context());
+        diagnosis.evidence.push(Evidence {
+            source: VERIFIED_GITHUB_DIFF_SOURCE.to_owned(),
+            finding: "FILE: src/checkout.rs\n@@ -1 +1 @@".to_owned(),
+        });
+        assert!(diagnosis.has_verified_source_context());
     }
 }
