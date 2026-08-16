@@ -1,0 +1,33 @@
+name: Format webhook proxy
+
+on:
+  push:
+    branches: [directly-usable-alpha]
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: directly-usable-alpha
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec prettier --write 'apps/web/app/api/webhooks/[provider]/route.ts'
+      - name: Commit formatter output and remove one-shot workflow
+        run: |
+          git config user.name "NoPager CI"
+          git config user.email "actions@users.noreply.github.com"
+          git add 'apps/web/app/api/webhooks/[provider]/route.ts'
+          git rm .github/workflows/format-webhook-proxy.yml
+          git commit -m "Apply repository Prettier formatting to webhook proxy"
+          git push origin HEAD:directly-usable-alpha
