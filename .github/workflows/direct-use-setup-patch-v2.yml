@@ -1,0 +1,52 @@
+name: Direct-use onboarding patch v2
+
+on:
+  push:
+    branches: [directly-usable-alpha]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: directly-usable-alpha
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          components: rustfmt
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: pnpm install --frozen-lockfile
+      - name: Apply patch embedded in v1 workflow
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import textwrap
+
+          source = Path('.github/workflows/direct-use-setup-patch.yml').read_text()
+          start_marker = "          python - <<'PY'\n"
+          end_marker = "\n          PY\n"
+          start = source.index(start_marker) + len(start_marker)
+          end = source.index(end_marker, start)
+          code = textwrap.dedent(source[start:end])
+          exec(compile(code, 'direct-use-setup-patch.py', 'exec'))
+          PY
+          cargo fmt --all
+          pnpm exec prettier --write apps/web/app/setup/page.tsx
+          git diff --check
+      - name: Commit onboarding patch and remove one-shot workflows
+        run: |
+          git config user.name "NoPager CI"
+          git config user.email "actions@users.noreply.github.com"
+          git add apps/server/src/main.rs apps/web/app/setup/page.tsx
+          git rm .github/workflows/direct-use-setup-patch.yml .github/workflows/direct-use-setup-patch-v2.yml
+          git commit -m "Make GitHub and Vercel onboarding directly usable"
+          git push origin HEAD:directly-usable-alpha
