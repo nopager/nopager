@@ -45,6 +45,22 @@ generate_secret() {
   fi
 }
 
+generate_uri_secret() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 32 | tr -d '\n'
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import secrets; print(secrets.token_hex(32))'
+  else
+    fail "OpenSSL or Python 3 is required once to generate the PostgreSQL password."
+  fi
+}
+
+current_postgres_password=$(read_env POSTGRES_PASSWORD)
+if [ -z "$current_postgres_password" ]; then
+  set_env POSTGRES_PASSWORD "$(generate_uri_secret)"
+  printf 'Generated POSTGRES_PASSWORD\n'
+fi
+
 current_master_key=$(read_env NOPAGER_MASTER_KEY)
 if [ -z "$current_master_key" ]; then
   set_env NOPAGER_MASTER_KEY "$(generate_secret)"
@@ -100,4 +116,5 @@ printf 'Console: http://localhost:%s/setup\n' "$web_port"
 printf 'Local API health: http://127.0.0.1:%s/healthz\n' "$api_port"
 printf '\nNext: open the console and complete GitHub, Vercel, AI provider, and health-check setup.\n'
 printf 'CLI/operator commands read NOPAGER_ADMIN_TOKEN from .env automatically.\n'
+printf 'Back up .env together with the PostgreSQL volume; losing NOPAGER_MASTER_KEY makes encrypted integration credentials unrecoverable.\n'
 printf 'Logs: docker compose logs -f server worker web\n'
