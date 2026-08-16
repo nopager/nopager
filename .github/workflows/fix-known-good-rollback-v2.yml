@@ -1,0 +1,58 @@
+name: Fix known-good rollback v2
+
+on:
+  push:
+    branches: [directly-usable-alpha]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: directly-usable-alpha
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          components: rustfmt
+      - name: Replace rollback shortcut by structure
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('apps/worker/src/main.rs')
+          text = path.read_text()
+          start = text.index('        "rollback" => {')
+          end = text.index('            database\n                .record_audit_event(', start)
+          block = text[start:end]
+          pattern = re.compile(
+              r'\s*let current = vercel\.get_deployment\(&known_good_id\)\.await\?;\s*'
+              r'if current\.target\.as_deref\(\) != Some\("production"\) \{\s*'
+              r'vercel\.rollback\(vercel_project_id, &known_good_id\)\.await\?;\s*\}\s*',
+              re.MULTILINE,
+          )
+          replacement = '''
+            // The known-good record is the deployment from before this repair promotion.
+            // Vercel's production target describes an environment, not current traffic.
+            // Always restore the recorded known-good deployment explicitly.
+            vercel.rollback(vercel_project_id, &known_good_id).await?;
+'''
+          block, count = pattern.subn(replacement, block, count=1)
+          if count != 1:
+              raise SystemExit(f'expected one rollback shortcut, found {count}')
+          path.write_text(text[:start] + block + text[end:])
+          PY
+          cargo fmt --all
+          git diff --check
+      - name: Commit fix and remove temporary workflows
+        run: |
+          git config user.name "NoPager CI"
+          git config user.email "actions@users.noreply.github.com"
+          git add apps/worker/src/main.rs
+          git rm .github/workflows/fix-known-good-rollback.yml .github/workflows/fix-known-good-rollback-v2.yml
+          git commit -m "Always rollback to the recorded known-good deployment"
+          git push origin HEAD:directly-usable-alpha
