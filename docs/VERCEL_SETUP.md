@@ -32,6 +32,31 @@ Generate a webhook secret and enter the same value in the setup wizard. Webhooks
 
 Do not point Vercel at the internal Rust API port. The public Next.js route forwards the raw signed request to the private API for verification.
 
+## Protected Preview deployments
+
+Vercel Deployment Protection can require authentication for Preview deployment URLs. NoPager must still be able to verify the exact Preview before a production promotion is allowed.
+
+Vercel provides **Protection Bypass for Automation** for this use case. If your project has protected Preview deployments:
+
+1. In Vercel, enable Protection Bypass for Automation for the protected project and generate a secret.
+2. Put that secret in the self-host `.env` file:
+
+```dotenv
+VERCEL_AUTOMATION_BYPASS_SECRET=your-generated-vercel-secret
+```
+
+3. Restart the Worker:
+
+```bash
+docker compose up -d worker
+```
+
+NoPager sends Vercel's `x-vercel-protection-bypass` header only when the health-check target is a `*.vercel.app` deployment hostname and only from the Worker process. The secret is not injected into Server or Web by the default Compose topology, is never returned by the NoPager API, and is not sent to custom production domains.
+
+The production health URL configured during setup must still pass publicly without this bypass. This keeps the ordinary production monitor independent from Vercel Preview authentication while allowing the repair Preview gate to work with protected deployments.
+
+Treat this bypass secret like a deployment credential. Keep `.env` private, rotate the secret in Vercel if it is exposed, and restart the Worker after rotation.
+
 ## Production deployment requirement
 
 During setup, NoPager verifies that the selected project is accessible and has a **READY production deployment**. The newest READY production deployment in the returned deployment history becomes the initial known-good rollback point; failed or canceled production attempts are never accepted as that baseline. If setup reports `vercel_production_deployment_not_found`, create a healthy production deployment first and retry.
@@ -45,4 +70,5 @@ The production health check is configured separately from the Vercel generated d
 - `vercel_project_not_accessible`: verify the token, Team ID scope, and project ID/name.
 - `vercel_connection_failed`: verify token validity and account/team access.
 - `vercel_production_deployment_not_found`: deploy the project to Production and wait until it is READY, then retry setup.
+- Preview health returns Vercel authentication/protection instead of your app: configure `VERCEL_AUTOMATION_BYPASS_SECRET` as described above and restart the Worker.
 - Polling errors: inspect `docker compose logs -f worker` and confirm the access token still has access to the project.
