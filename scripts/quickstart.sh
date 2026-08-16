@@ -1,5 +1,6 @@
 #!/usr/bin/env sh
 set -eu
+umask 077
 
 fail() {
   printf 'NoPager quickstart: %s\n' "$1" >&2
@@ -14,6 +15,7 @@ if [ ! -f .env ]; then
   cp .env.example .env
   printf 'Created .env from .env.example\n'
 fi
+chmod 600 .env
 
 set_env() {
   key=$1
@@ -26,6 +28,7 @@ set_env() {
     END { if (!found) print key "=" value }
   ' .env > "$tmp"
   mv "$tmp" .env
+  chmod 600 .env
 }
 
 read_env() {
