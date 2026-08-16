@@ -10,14 +10,12 @@ type SetupData = {
   name: string;
   repoOwner: string;
   repoName: string;
-  githubRepoId: string;
   githubAppId: string;
   githubInstallationId: string;
   githubPrivateKey: string;
   githubWebhookSecret: string;
   vercelTeamId: string;
   vercelProjectId: string;
-  vercelProjectName: string;
   vercelToken: string;
   vercelWebhookSecret: string;
   provider: "openai" | "anthropic" | "gemini";
@@ -34,14 +32,12 @@ const initial: SetupData = {
   name: "",
   repoOwner: "",
   repoName: "",
-  githubRepoId: "",
   githubAppId: "",
   githubInstallationId: "",
   githubPrivateKey: "",
   githubWebhookSecret: "",
   vercelTeamId: "",
   vercelProjectId: "",
-  vercelProjectName: "",
   vercelToken: "",
   vercelWebhookSecret: "",
   provider: "openai",
@@ -299,12 +295,14 @@ function Input({
   onChange,
   type = "text",
   full = false,
+  required = true,
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
   type?: string;
   full?: boolean;
+  required?: boolean;
 }) {
   return (
     <label className={full ? "full" : ""}>
@@ -316,6 +314,31 @@ function Input({
         onChange={(event) => onChange(event.target.value)}
         autoComplete="off"
       />
+    </label>
+  );
+}
+
+function TextArea({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="full">
+      {label}
+      <textarea
+        required
+        rows={9}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        autoComplete="off"
+        spellCheck={false}
+      />
+      <small>Paste the complete PEM block, including BEGIN/END lines.</small>
     </label>
   );
 }
