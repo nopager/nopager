@@ -174,7 +174,9 @@ function incidentOutcome(incident: IncidentDetail) {
   switch (incident.status) {
     case "RESOLVED":
       return {
-        label: incident.autonomousResolution ? "Resolved autonomously" : "Resolved",
+        label: incident.autonomousResolution
+          ? "Resolved autonomously"
+          : "Resolved",
         headline: "Production is healthy again.",
         message:
           incident.rootCauseSummary ??
@@ -206,7 +208,8 @@ function incidentOutcome(incident: IncidentDetail) {
         headline: "Production verification failed. NoPager is rolling back.",
         message:
           "The repair did not satisfy the production safety gate, so the previous known-good deployment is being restored.",
-        nextStep: "No new repair will be trusted until rollback verification completes.",
+        nextStep:
+          "No new repair will be trusted until rollback verification completes.",
       };
     case "FAILED":
     case "ESCALATED":
@@ -223,7 +226,8 @@ function incidentOutcome(incident: IncidentDetail) {
       return {
         label: "Repair rejected",
         headline: "The proposed production change was not applied.",
-        message: "The incident was closed without promoting the repair to production.",
+        message:
+          "The incident was closed without promoting the repair to production.",
         nextStep: "Production remains on the previously approved deployment.",
       };
     default:
@@ -233,7 +237,8 @@ function incidentOutcome(incident: IncidentDetail) {
         message:
           incident.rootCauseSummary ??
           "NoPager is collecting evidence, diagnosing the issue, and preparing the smallest reversible repair.",
-        nextStep: "No action needed unless the incident is escalated or requests approval.",
+        nextStep:
+          "No action needed unless the incident is escalated or requests approval.",
       };
   }
 }
