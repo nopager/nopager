@@ -99,7 +99,7 @@ services:
     environment:
       NOPAGER_API_URL: http://server:8080
     ports:
-      - "${NOPAGER_WEB_BIND:-0.0.0.0}:${NOPAGER_WEB_PORT:-3000}:3000"
+      - "${NOPAGER_WEB_BIND:-127.0.0.1}:${NOPAGER_WEB_PORT:-3000}:3000"
     depends_on:
       - server
 
