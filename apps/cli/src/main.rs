@@ -1,4 +1,7 @@
-use std::{fs, process::Command as ProcessCommand};
+use std::{fs, path::Path, process::Command as ProcessCommand};
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use base64::{
     Engine as _,
@@ -77,12 +80,9 @@ fn init() -> anyhow::Result<()> {
         fill_blank_env(contents, "NOPAGER_MASTER_KEY", &STANDARD.encode(master));
     let (contents, admin_changed) =
         fill_blank_env(contents, "NOPAGER_ADMIN_TOKEN", &STANDARD.encode(admin));
-    if postgres_changed
-        || master_changed
-        || admin_changed
-        || !std::path::Path::new(".env").exists()
-    {
-        fs::write(".env", contents)?;
+    let env_path = Path::new(".env");
+    if postgres_changed || master_changed || admin_changed || !env_path.exists() {
+        fs::write(env_path, contents)?;
         println!("Created or completed .env with local secrets.");
         if legacy_database && postgres_changed {
             eprintln!(
@@ -92,18 +92,18 @@ fn init() -> anyhow::Result<()> {
     } else {
         println!(".env already contains local secrets; left them unchanged.");
     }
+    secure_env_permissions(env_path)?;
     println!("Continue setup at {}/setup", web_url());
     Ok(())
 }
 
 fn uses_legacy_compose_database(contents: &str) -> bool {
-    !contents
-        .lines()
-        .any(|line| line.starts_with("POSTGRES_PASSWORD=") && line.len() > "POSTGRES_PASSWORD=".len())
-        && contents.lines().any(|line| {
-            line.trim()
-                .starts_with("DATABASE_URL=postgresql://nopager:nopager@postgres:")
-        })
+    !contents.lines().any(|line| {
+        line.starts_with("POSTGRES_PASSWORD=") && line.len() > "POSTGRES_PASSWORD=".len()
+    }) && contents.lines().any(|line| {
+        line.trim()
+            .starts_with("DATABASE_URL=postgresql://nopager:nopager@postgres:")
+    })
 }
 
 fn fill_blank_env(mut contents: String, name: &str, value: &str) -> (String, bool) {
@@ -139,6 +139,28 @@ fn fill_blank_env(mut contents: String, name: &str, value: &str) -> (String, boo
     (contents, changed)
 }
 
+#[cfg(unix)]
+fn secure_env_permissions(path: &Path) -> std::io::Result<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn secure_env_permissions(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn env_permissions_private(path: &Path) -> bool {
+    fs::metadata(path)
+        .map(|metadata| metadata.permissions().mode() & 0o077 == 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn env_permissions_private(path: &Path) -> bool {
+    path.exists()
+}
+
 async fn doctor() -> anyhow::Result<()> {
     let mut healthy = true;
 
@@ -166,6 +188,13 @@ async fn doctor() -> anyhow::Result<()> {
             healthy = false;
             eprintln!("✗ {variable} is missing");
         }
+    }
+
+    if env_permissions_private(Path::new(".env")) {
+        println!("✓ .env permissions are private");
+    } else {
+        healthy = false;
+        eprintln!("✗ .env is missing or readable by other local users");
     }
 
     match client().get(api_url("readyz")?).send().await {
