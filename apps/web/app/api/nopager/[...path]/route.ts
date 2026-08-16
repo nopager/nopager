@@ -28,10 +28,7 @@ function privateNoStoreHeaders(contentType = "application/json") {
 }
 
 function jsonError(error: string, status: number) {
-  return Response.json(
-    { error },
-    { status, headers: privateNoStoreHeaders() },
-  );
+  return Response.json({ error }, { status, headers: privateNoStoreHeaders() });
 }
 
 async function proxy(
