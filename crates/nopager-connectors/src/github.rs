@@ -269,7 +269,7 @@ impl GitHubClient {
     ) -> Result<PullRequest, ConnectorError> {
         validate_segment(&input.owner, "owner")?;
         validate_segment(&input.repository, "repository")?;
-        validate_segment(&input.base_branch, "base branch")?;
+        validate_git_ref(&input.base_branch, "base branch")?;
         if input.files.is_empty() {
             return Err(ConnectorError::InvalidConfiguration(
                 "repair must contain at least one file".into(),
@@ -597,6 +597,34 @@ fn validate_segment(value: &str, label: &str) -> Result<(), ConnectorError> {
     Ok(())
 }
 
+fn validate_git_ref(value: &str, label: &str) -> Result<(), ConnectorError> {
+    let invalid_component = value.split('/').any(|component| {
+        component.is_empty()
+            || component.starts_with('.')
+            || component.ends_with('.')
+            || component.ends_with(".lock")
+    });
+    let invalid_character = value.chars().any(|character| {
+        character.is_ascii_control()
+            || character == ' '
+            || matches!(character, '~' | '^' | ':' | '?' | '*' | '[' | '\\')
+    });
+    if value.is_empty()
+        || value == "@"
+        || value.starts_with('/')
+        || value.ends_with('/')
+        || value.contains("..")
+        || value.contains("@{")
+        || invalid_component
+        || invalid_character
+    {
+        return Err(ConnectorError::InvalidConfiguration(format!(
+            "invalid {label}"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_repo_path(path: &str) -> Result<(), ConnectorError> {
     if path.is_empty()
         || path.starts_with('/')
@@ -622,6 +650,34 @@ mod tests {
             repair_branch("0195-abcd", "Fix: Login 500!"),
             "nopager/incident-0195abcd-fix-login-500"
         );
+    }
+
+    #[test]
+    fn accepts_common_default_branch_names() {
+        for branch in ["main", "release/2026.08", "feature/customer-fix", "v2"] {
+            assert!(validate_git_ref(branch, "base branch").is_ok(), "{branch}");
+        }
+    }
+
+    #[test]
+    fn rejects_unsafe_or_invalid_git_refs() {
+        for branch in [
+            "",
+            "@",
+            "/main",
+            "main/",
+            "feature//fix",
+            ".hidden/main",
+            "feature/.hidden",
+            "release..candidate",
+            "feature/foo.lock",
+            "feature/@{bad",
+            "bad branch",
+            "bad?branch",
+            "bad\\branch",
+        ] {
+            assert!(validate_git_ref(branch, "base branch").is_err(), "{branch}");
+        }
     }
 
     #[test]
