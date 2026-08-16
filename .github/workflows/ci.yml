@@ -24,11 +24,7 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Show Prettier diff for changed UI
-        run: |
-          pnpm exec prettier --write "apps/web/app/incidents/[id]/page.tsx" "apps/web/components/ui.tsx" "apps/web/lib/model.ts" "apps/web/lib/model.test.ts"
-          git diff -- "apps/web/app/incidents/[id]/page.tsx" "apps/web/components/ui.tsx" "apps/web/lib/model.ts" "apps/web/lib/model.test.ts"
-          git diff --exit-code
+      - run: pnpm format:check
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test
