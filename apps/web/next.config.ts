@@ -11,7 +11,8 @@ const securityHeaders = [
   },
   {
     key: "Content-Security-Policy",
-    value: "frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'",
+    value:
+      "frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'",
   },
 ];
 
