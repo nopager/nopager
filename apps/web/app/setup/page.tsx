@@ -42,7 +42,7 @@ const initial: SetupData = {
   vercelWebhookSecret: "",
   provider: "openai",
   providerApiKey: "",
-  providerModel: "gpt-5.4-mini",
+  providerModel: "",
   productionUrl: "",
   healthCheckUrl: "",
   safetyMode: "safe",
@@ -279,8 +279,8 @@ function description(step: number) {
   return [
     "Your local account controls production approvals.",
     "Add the GitHub App and repository NoPager may repair. Repository ID and default branch are discovered automatically.",
-    "Select the Vercel project used for previews and production. Team ID is optional for a personal account.",
-    "Your API key is encrypted locally and never shown again.",
+    "Select the Vercel project used for previews and production. Team ID and webhook secret are optional; polling remains active without a Vercel webhook.",
+    "Your API key is encrypted locally and never shown again. Enter the exact model ID supported by your provider so NoPager does not depend on a stale hardcoded model name.",
     "NoPager will require a passing public HTTPS health check.",
     "Safe Mode requires approval before production changes.",
   ][step];
@@ -293,6 +293,7 @@ function Input({
   type = "text",
   full = false,
   required = true,
+  minLength,
 }: {
   label: string;
   value: string;
@@ -300,12 +301,14 @@ function Input({
   type?: string;
   full?: boolean;
   required?: boolean;
+  minLength?: number;
 }) {
   return (
     <label className={full ? "full" : ""}>
       {label}
       <input
         required={required}
+        minLength={minLength}
         type={type}
         value={value}
         onChange={(event) => onChange(event.target.value)}
@@ -356,6 +359,7 @@ function fields(
         <Input
           label="Password (12+ characters)"
           type="password"
+          minLength={12}
           value={data.password}
           onChange={(v) => update("password", v)}
         />
@@ -381,17 +385,20 @@ function fields(
         />
         <Input
           label="GitHub App ID"
+          type="number"
           value={data.githubAppId}
           onChange={(v) => update("githubAppId", v)}
         />
         <Input
           label="Installation ID"
+          type="number"
           value={data.githubInstallationId}
           onChange={(v) => update("githubInstallationId", v)}
         />
         <Input
           label="Webhook secret"
           type="password"
+          minLength={16}
           value={data.githubWebhookSecret}
           onChange={(v) => update("githubWebhookSecret", v)}
         />
@@ -423,10 +430,11 @@ function fields(
           onChange={(v) => update("vercelToken", v)}
         />
         <Input
-          label="Webhook secret"
+          label="Webhook secret (optional)"
           type="password"
           value={data.vercelWebhookSecret}
           onChange={(v) => update("vercelWebhookSecret", v)}
+          required={false}
         />
       </>
     );
@@ -437,9 +445,10 @@ function fields(
           Provider
           <select
             value={data.provider}
-            onChange={(event) =>
-              update("provider", event.target.value as SetupData["provider"])
-            }
+            onChange={(event) => {
+              update("provider", event.target.value as SetupData["provider"]);
+              update("providerModel", "");
+            }}
           >
             <option value="openai">OpenAI</option>
             <option value="anthropic">Anthropic</option>
@@ -447,7 +456,7 @@ function fields(
           </select>
         </label>
         <Input
-          label="Default model"
+          label="Model ID"
           value={data.providerModel}
           onChange={(v) => update("providerModel", v)}
         />
