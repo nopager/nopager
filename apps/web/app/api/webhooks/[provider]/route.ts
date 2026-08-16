@@ -43,7 +43,8 @@ export async function POST(
       cache: "no-store",
     });
     const responseHeaders = new Headers({
-      "content-type": upstream.headers.get("content-type") ?? "application/json",
+      "content-type":
+        upstream.headers.get("content-type") ?? "application/json",
     });
     return new Response(upstream.body, {
       status: upstream.status,
