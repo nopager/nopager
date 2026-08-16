@@ -37,8 +37,9 @@ export function Card({
 
 export function StatusBadge({ state }: { state: UiIncidentState }) {
   const label = state.replaceAll("_", " ");
+  const styleState = state === "PAUSED" ? "human_needed" : state.toLowerCase();
   return (
-    <span className={`status-badge status-${state.toLowerCase()}`}>
+    <span className={`status-badge status-${styleState}`}>
       {label}
     </span>
   );
