@@ -110,6 +110,7 @@ export default function SetupPage() {
               appId: Number(data.githubAppId),
               installationId: Number(data.githubInstallationId),
               privateKey: data.githubPrivateKey,
+              repoOwner: data.repoOwner,
               repoName: data.repoName,
             },
           ],
@@ -149,7 +150,6 @@ export default function SetupPage() {
             ...data,
             githubAppId: Number(data.githubAppId),
             githubInstallationId: Number(data.githubInstallationId),
-            githubRepoId: Number(data.githubRepoId),
           }),
         });
         await expectOk(response);
@@ -181,10 +181,7 @@ export default function SetupPage() {
                 : "Connected"
             }
           />
-          <Summary
-            label="Vercel"
-            value={data.vercelProjectName || "Connected"}
-          />
+          <Summary label="Vercel" value={data.vercelProjectId || "Connected"} />
           <Summary
             label="Health check"
             value={data.healthCheckUrl || "Active"}
@@ -281,8 +278,8 @@ function title(step: number, adminExists: boolean) {
 function description(step: number) {
   return [
     "Your local account controls production approvals.",
-    "Add the GitHub App and repository NoPager may repair.",
-    "Select the Vercel project used for previews and production.",
+    "Add the GitHub App and repository NoPager may repair. Repository ID and default branch are discovered automatically.",
+    "Select the Vercel project used for previews and production. Team ID is optional for a personal account.",
     "Your API key is encrypted locally and never shown again.",
     "NoPager will require a passing public HTTPS health check.",
     "Safe Mode requires approval before production changes.",
@@ -308,7 +305,7 @@ function Input({
     <label className={full ? "full" : ""}>
       {label}
       <input
-        required
+        required={required}
         type={type}
         value={value}
         onChange={(event) => onChange(event.target.value)}
@@ -383,11 +380,6 @@ function fields(
           onChange={(v) => update("repoName", v)}
         />
         <Input
-          label="Repository numeric ID"
-          value={data.githubRepoId}
-          onChange={(v) => update("githubRepoId", v)}
-        />
-        <Input
           label="GitHub App ID"
           value={data.githubAppId}
           onChange={(v) => update("githubAppId", v)}
@@ -403,10 +395,8 @@ function fields(
           value={data.githubWebhookSecret}
           onChange={(v) => update("githubWebhookSecret", v)}
         />
-        <Input
-          full
+        <TextArea
           label="GitHub App private key (PEM)"
-          type="password"
           value={data.githubPrivateKey}
           onChange={(v) => update("githubPrivateKey", v)}
         />
@@ -416,19 +406,15 @@ function fields(
     return (
       <>
         <Input
-          label="Team ID"
+          label="Team ID (optional for personal account)"
           value={data.vercelTeamId}
           onChange={(v) => update("vercelTeamId", v)}
+          required={false}
         />
         <Input
-          label="Project ID"
+          label="Project ID or project name"
           value={data.vercelProjectId}
           onChange={(v) => update("vercelProjectId", v)}
-        />
-        <Input
-          label="Project name"
-          value={data.vercelProjectName}
-          onChange={(v) => update("vercelProjectName", v)}
         />
         <Input
           label="Access token"
