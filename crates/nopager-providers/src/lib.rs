@@ -1,0 +1,218 @@
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use thiserror::Error;
+
+mod http;
+pub use http::{AnthropicProvider, GeminiProvider, OpenAiProvider};
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosisInput {
+    pub incident_summary: String,
+    pub recent_commits: Vec<CommitContext>,
+    pub stack_trace: Option<String>,
+    pub deployment: Value,
+    pub health_failure: Value,
+    pub relevant_files: Vec<SourceFile>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitContext {
+    pub sha: String,
+    pub message: String,
+    pub changed_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceFile {
+    pub path: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DiagnosisResult {
+    pub suspected_root_cause: String,
+    pub evidence: Vec<Evidence>,
+    pub confidence: f32,
+    pub affected_files: Vec<String>,
+    pub proposed_actions: Vec<String>,
+    pub risk_level: RiskLevel,
+    pub validation_plan: Vec<String>,
+    pub rollback_plan: String,
+}
+
+impl DiagnosisResult {
+    pub fn validate(&self) -> Result<(), OutputValidationError> {
+        if self.suspected_root_cause.trim().is_empty() {
+            return Err(OutputValidationError::MissingRootCause);
+        }
+        if self.evidence.is_empty() {
+            return Err(OutputValidationError::MissingEvidence);
+        }
+        if !self.confidence.is_finite() || !(0.0..=1.0).contains(&self.confidence) {
+            return Err(OutputValidationError::InvalidConfidence);
+        }
+        for path in &self.affected_files {
+            validate_relative_path(path)?;
+        }
+        if self.validation_plan.is_empty() || self.rollback_plan.trim().is_empty() {
+            return Err(OutputValidationError::MissingSafetyPlan);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Evidence {
+    pub source: String,
+    pub finding: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RiskLevel {
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepairInput {
+    pub diagnosis: DiagnosisResult,
+    pub repository_rules: Vec<String>,
+    pub previous_failures: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RepairProposal {
+    pub unified_diff: String,
+    pub changed_files: Vec<String>,
+    pub explanation: String,
+    pub validation_commands: Vec<ControlledCommand>,
+}
+
+impl RepairProposal {
+    pub fn validate(&self) -> Result<(), OutputValidationError> {
+        if self.unified_diff.trim().is_empty() || self.unified_diff.len() > 1_000_000 {
+            return Err(OutputValidationError::InvalidPatch);
+        }
+        if self.changed_files.is_empty() {
+            return Err(OutputValidationError::InvalidPatch);
+        }
+        for path in &self.changed_files {
+            validate_relative_path(path)?;
+        }
+        if self.validation_commands.is_empty() {
+            return Err(OutputValidationError::MissingSafetyPlan);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControlledCommand {
+    pub program: String,
+    pub arguments: Vec<String>,
+}
+
+#[async_trait]
+pub trait ModelProvider: Send + Sync {
+    fn id(&self) -> &'static str;
+    async fn test_connection(&self) -> Result<(), ProviderError>;
+    async fn diagnose(&self, input: &DiagnosisInput) -> Result<DiagnosisResult, ProviderError>;
+    async fn propose_patch(&self, input: &RepairInput) -> Result<RepairProposal, ProviderError>;
+}
+
+fn validate_relative_path(path: &str) -> Result<(), OutputValidationError> {
+    let normalized = path.replace('\\', "/");
+    if normalized.is_empty()
+        || normalized.starts_with('/')
+        || normalized.contains("../")
+        || normalized.contains(':')
+    {
+        return Err(OutputValidationError::UnsafePath(path.to_owned()));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum OutputValidationError {
+    #[error("model output omitted the root cause")]
+    MissingRootCause,
+    #[error("model output omitted evidence")]
+    MissingEvidence,
+    #[error("confidence must be between zero and one")]
+    InvalidConfidence,
+    #[error("model output contains an unsafe path: {0}")]
+    UnsafePath(String),
+    #[error("model output omitted validation or rollback planning")]
+    MissingSafetyPlan,
+    #[error("model patch is empty, too large, or has no changed files")]
+    InvalidPatch,
+}
+
+#[derive(Debug, Error)]
+pub enum ProviderError {
+    #[error("model provider authentication failed")]
+    Authentication,
+    #[error("model provider request failed: {0}")]
+    Request(String),
+    #[error("model provider returned invalid structured output: {0}")]
+    InvalidOutput(#[from] OutputValidationError),
+    #[error("model provider response could not be decoded")]
+    Decode,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_diagnosis() -> DiagnosisResult {
+        DiagnosisResult {
+            suspected_root_cause: "Recent null handling regression".to_owned(),
+            evidence: vec![Evidence {
+                source: "stack trace".to_owned(),
+                finding: "src/checkout.rs:48".to_owned(),
+            }],
+            confidence: 0.92,
+            affected_files: vec!["src/checkout.rs".to_owned()],
+            proposed_actions: vec!["add a null guard".to_owned()],
+            risk_level: RiskLevel::Low,
+            validation_plan: vec!["run checkout tests".to_owned()],
+            rollback_plan: "restore the known-good deployment".to_owned(),
+        }
+    }
+
+    #[test]
+    fn accepts_complete_structured_diagnosis() {
+        assert_eq!(valid_diagnosis().validate(), Ok(()));
+    }
+
+    #[test]
+    fn rejects_repo_escape_paths() {
+        let mut diagnosis = valid_diagnosis();
+        diagnosis.affected_files = vec!["../../host-secret".to_owned()];
+        assert!(matches!(
+            diagnosis.validate(),
+            Err(OutputValidationError::UnsafePath(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_non_finite_confidence() {
+        let mut diagnosis = valid_diagnosis();
+        diagnosis.confidence = f32::NAN;
+        assert_eq!(
+            diagnosis.validate(),
+            Err(OutputValidationError::InvalidConfidence)
+        );
+    }
+}

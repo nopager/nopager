@@ -1,0 +1,10 @@
+.git
+.env
+.next
+.turbo
+node_modules
+target
+**/.next
+**/.turbo
+**/node_modules
+**/*.log

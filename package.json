@@ -1,0 +1,21 @@
+{
+  "name": "nopager",
+  "version": "0.1.0-alpha.1",
+  "private": true,
+  "packageManager": "pnpm@10.32.1",
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev --parallel",
+    "lint": "turbo run lint && cargo clippy --workspace --all-targets -- -D warnings",
+    "test": "turbo run test && cargo test --workspace",
+    "typecheck": "turbo run typecheck",
+    "format": "prettier --write . && cargo fmt --all",
+    "format:check": "prettier --check . && cargo fmt --all -- --check",
+    "rust:build": "cargo build --workspace",
+    "rust:test": "cargo test --workspace"
+  },
+  "devDependencies": {
+    "prettier": "3.6.2",
+    "turbo": "2.5.6"
+  }
+}

@@ -1,0 +1,7 @@
+packages:
+  - "apps/web"
+  - "examples/demo-next-app"
+
+allowBuilds:
+  esbuild: true
+  unrs-resolver: true

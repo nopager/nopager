@@ -1,0 +1,1139 @@
+use std::sync::Arc;
+
+use argon2::{
+    Argon2, PasswordHash, PasswordHasher, PasswordVerifier,
+    password_hash::{SaltString, rand_core::OsRng},
+};
+use axum::{
+    Json, Router,
+    body::Bytes,
+    extract::{DefaultBodyLimit, Path, State},
+    http::{HeaderMap, StatusCode, header::SET_COOKIE},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use nopager_config::ServerConfig;
+use nopager_connectors::{github::GitHubAppAuth, vercel::VercelClient};
+use nopager_crypto::SecretCipher;
+use nopager_db::{Database, ProtectedAppSetup};
+use nopager_monitor::{check_http, validate_health_url};
+use nopager_providers::{AnthropicProvider, GeminiProvider, ModelProvider, OpenAiProvider};
+use nopager_webhooks::{verify_github, verify_vercel};
+use rand::RngCore;
+use secrecy::{ExposeSecret, SecretString};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use time::{Duration as TimeDuration, OffsetDateTime};
+use tower_http::trace::TraceLayer;
+use tracing::info;
+use tracing_subscriber::EnvFilter;
+use url::Url;
+
+#[derive(Serialize)]
+struct HealthResponse {
+    status: &'static str,
+    service: &'static str,
+    version: &'static str,
+}
+
+#[derive(Deserialize)]
+struct AdminCredentials {
+    username: String,
+    password: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProtectAppRequest {
+    name: String,
+    repo_owner: String,
+    repo_name: String,
+    github_repo_id: u64,
+    github_app_id: u64,
+    github_installation_id: u64,
+    github_private_key: String,
+    github_webhook_secret: String,
+    vercel_team_id: String,
+    vercel_project_id: String,
+    vercel_project_name: String,
+    vercel_token: String,
+    vercel_webhook_secret: String,
+    provider: String,
+    provider_api_key: String,
+    provider_model: String,
+    production_url: String,
+    health_check_url: String,
+    safety_mode: String,
+}
+
+#[derive(Deserialize)]
+struct SafetyModeRequest {
+    mode: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GitHubConnectionRequest {
+    app_id: u64,
+    installation_id: u64,
+    private_key: String,
+    repo_name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VercelConnectionRequest {
+    team_id: String,
+    project_id: String,
+    token: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderConnectionRequest {
+    provider: String,
+    api_key: String,
+    model: String,
+}
+
+#[derive(Deserialize)]
+struct HealthConnectionRequest {
+    url: String,
+}
+
+#[derive(Clone)]
+struct ServerState {
+    database: Option<Database>,
+    github_webhook_secret: Option<Arc<[u8]>>,
+    vercel_webhook_secret: Option<Arc<[u8]>>,
+    admin_token: Option<Arc<[u8]>>,
+    secret_cipher: Option<Arc<SecretCipher>>,
+}
+
+async fn healthz() -> Json<HealthResponse> {
+    Json(HealthResponse {
+        status: "ok",
+        service: "nopager-server",
+        version: env!("CARGO_PKG_VERSION"),
+    })
+}
+
+async fn readyz(State(state): State<ServerState>) -> (StatusCode, Json<HealthResponse>) {
+    let ready = match state.database {
+        Some(database) => database.ready().await.is_ok(),
+        None => false,
+    };
+    let response = HealthResponse {
+        status: if ready { "ready" } else { "not_ready" },
+        service: "nopager-server",
+        version: env!("CARGO_PKG_VERSION"),
+    };
+    (
+        if ready {
+            StatusCode::OK
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        },
+        Json(response),
+    )
+}
+
+async fn overview(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> (StatusCode, Json<Value>) {
+    if !authorized(&state, &headers).await {
+        return api_error(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    let Some(database) = &state.database else {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "database_not_configured");
+    };
+    match database.overview().await {
+        Ok(value) => (StatusCode::OK, Json(value)),
+        Err(error) => {
+            tracing::error!(%error, "failed to load overview");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
+        }
+    }
+}
+
+async fn incidents(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> (StatusCode, Json<Value>) {
+    if !authorized(&state, &headers).await {
+        return api_error(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    let Some(database) = &state.database else {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "database_not_configured");
+    };
+    match database.incidents(100).await {
+        Ok(value) => (StatusCode::OK, Json(json!({ "incidents": value }))),
+        Err(error) => {
+            tracing::error!(%error, "failed to load incidents");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
+        }
+    }
+}
+
+async fn incident_detail(
+    State(state): State<ServerState>,
+    Path(incident_id): Path<uuid::Uuid>,
+    headers: HeaderMap,
+) -> (StatusCode, Json<Value>) {
+    if !authorized(&state, &headers).await {
+        return api_error(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    let Some(database) = &state.database else {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "database_not_configured");
+    };
+    match database.incident_detail(incident_id).await {
+        Ok(Some(value)) => (StatusCode::OK, Json(value)),
+        Ok(None) => api_error(StatusCode::NOT_FOUND, "incident_not_found"),
+        Err(error) => {
+            tracing::error!(%incident_id, %error, "failed to load incident detail");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
+        }
+    }
+}
+
+async fn settings(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> (StatusCode, Json<Value>) {
+    if !authorized(&state, &headers).await {
+        return api_error(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    let Some(database) = &state.database else {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "database_not_configured");
+    };
+    match database.app_settings().await {
+        Ok(Some(value)) => (StatusCode::OK, Json(value)),
+        Ok(None) => api_error(StatusCode::NOT_FOUND, "app_not_configured"),
+        Err(error) => {
+            tracing::error!(%error, "failed to load app settings");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
+        }
+    }
+}
+
+async fn set_safety_mode(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Json(request): Json<SafetyModeRequest>,
+) -> (StatusCode, Json<Value>) {
+    if !authorized(&state, &headers).await {
+        return api_error(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    let Some(database) = &state.database else {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "database_not_configured");
+    };
+    let mode = if request.mode == "autopilot" {
+        "autopilot_experimental"
+    } else {
+        request.mode.as_str()
+    };
+    match database.set_safety_mode(mode, "api-admin").await {
+        Ok(updated) => (
+            StatusCode::OK,
+            Json(json!({ "safetyMode": mode, "updatedProjects": updated })),
+        ),
+        Err(nopager_db::DatabaseError::InvalidSafetyMode) => {
+            api_error(StatusCode::BAD_REQUEST, "invalid_safety_mode")
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to update safety mode");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
+        }
+    }
+}
+
+async fn setup_status(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> (StatusCode, Json<Value>) {
+    let Some(database) = &state.database else {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "database_not_configured");
+    };
+    match tokio::try_join!(database.admin_exists(), database.project_exists()) {
+        Ok((admin_created, app_protected)) => (
+            StatusCode::OK,
+            Json(json!({
+                "adminCreated": admin_created,
+                "appProtected": app_protected,
+                "authenticated": authorized(&state, &headers).await
+            })),
+        ),
+        Err(error) => {
+            tracing::error!(%error, "failed to load setup status");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
+        }
+    }
+}
+
+async fn test_github_connection(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Json(request): Json<GitHubConnectionRequest>,
+) -> (StatusCode, Json<Value>) {
+    if !authorized(&state, &headers).await {
+        return api_error(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    let result = match GitHubAppAuth::new(
+        request.app_id,
+        request.installation_id,
+        SecretString::from(request.private_key),
+    ) {
+        Ok(auth) => auth.installation_client(&request.repo_name).await,
+        Err(error) => Err(error),
+    };
+    connection_result(result.map(|_| ()), "github_connection_failed")
+}
+
+async fn test_vercel_connection(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Json(request): Json<VercelConnectionRequest>,
+) -> (StatusCode, Json<Value>) {
+    if !authorized(&state, &headers).await {
+        return api_error(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    let result = match VercelClient::new(SecretString::from(request.token), Some(request.team_id)) {
+        Ok(client) => client
+            .list_deployments(&request.project_id, 10)
+            .await
+            .map(|deployments| {
+                deployments
+                    .iter()
+                    .any(|deployment| deployment.target.as_deref() == Some("production"))
+            }),
+        Err(error) => Err(error),
+    };
+    match result {
+        Ok(true) => connection_success(),
+        Ok(false) => api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "vercel_production_deployment_not_found",
+        ),
+        Err(error) => {
+            tracing::warn!(%error, "Vercel connection test failed");
+            api_error(StatusCode::UNPROCESSABLE_ENTITY, "vercel_connection_failed")
+        }
+    }
+}
+
+async fn test_provider_connection(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Json(request): Json<ProviderConnectionRequest>,
+) -> (StatusCode, Json<Value>) {
+    if !authorized(&state, &headers).await {
+        return api_error(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    let provider = configured_provider(&request.provider, request.api_key, request.model);
+    match provider {
+        Ok(provider) => match provider.test_connection().await {
+            Ok(()) => connection_success(),
+            Err(error) => {
+                tracing::warn!(%error, "model provider connection test failed");
+                api_error(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "provider_connection_failed",
+                )
+            }
+        },
+        Err(()) => api_error(StatusCode::BAD_REQUEST, "unsupported_provider"),
+    }
+}
+
+async fn test_health_connection(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Json(request): Json<HealthConnectionRequest>,
+) -> (StatusCode, Json<Value>) {
+    if !authorized(&state, &headers).await {
+        return api_error(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    let url = match Url::parse(&request.url) {
+        Ok(url) if validate_health_url(&url).is_ok() => url,
+        _ => return api_error(StatusCode::BAD_REQUEST, "unsafe_health_check_url"),
+    };
+    match check_http(&url, 200, std::time::Duration::from_secs(10)).await {
+        Ok(observation) if observation.success => connection_success(),
+        Ok(_) | Err(_) => api_error(StatusCode::UNPROCESSABLE_ENTITY, "production_health_failed"),
+    }
+}
+
+fn configured_provider(
+    kind: &str,
+    api_key: String,
+    model: String,
+) -> Result<Box<dyn ModelProvider>, ()> {
+    let key = SecretString::from(api_key);
+    match kind {
+        "openai" => OpenAiProvider::new(key, model)
+            .map(|value| Box::new(value) as Box<dyn ModelProvider>)
+            .map_err(|_| ()),
+        "anthropic" => AnthropicProvider::new(key, model)
+            .map(|value| Box::new(value) as Box<dyn ModelProvider>)
+            .map_err(|_| ()),
+        "gemini" => GeminiProvider::new(key, model)
+            .map(|value| Box::new(value) as Box<dyn ModelProvider>)
+            .map_err(|_| ()),
+        _ => Err(()),
+    }
+}
+
+fn connection_result<E: std::fmt::Display>(
+    result: Result<(), E>,
+    error_code: &'static str,
+) -> (StatusCode, Json<Value>) {
+    match result {
+        Ok(()) => connection_success(),
+        Err(error) => {
+            tracing::warn!(%error, "setup connection test failed");
+            api_error(StatusCode::UNPROCESSABLE_ENTITY, error_code)
+        }
+    }
+}
+
+fn connection_success() -> (StatusCode, Json<Value>) {
+    (StatusCode::OK, Json(json!({ "connected": true })))
+}
+
+async fn protect_app(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Json(request): Json<ProtectAppRequest>,
+) -> Response {
+    if !authorized(&state, &headers).await {
+        return api_error(StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    let Some(database) = &state.database else {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "database_not_configured")
+            .into_response();
+    };
+    let Some(cipher) = &state.secret_cipher else {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "master_key_not_configured")
+            .into_response();
+    };
+    let production_url = match Url::parse(&request.production_url) {
+        Ok(url) if validate_health_url(&url).is_ok() => url,
+        _ => return api_error(StatusCode::BAD_REQUEST, "unsafe_production_url").into_response(),
+    };
+    let health_check_url = match Url::parse(&request.health_check_url) {
+        Ok(url) if validate_health_url(&url).is_ok() => url,
+        _ => return api_error(StatusCode::BAD_REQUEST, "unsafe_health_check_url").into_response(),
+    };
+    if !valid_setup(&request) {
+        return api_error(StatusCode::BAD_REQUEST, "invalid_setup").into_response();
+    }
+    match check_http(&health_check_url, 200, std::time::Duration::from_secs(10)).await {
+        Ok(observation) if observation.success => {}
+        Ok(_) => {
+            return api_error(StatusCode::UNPROCESSABLE_ENTITY, "production_health_failed")
+                .into_response();
+        }
+        Err(error) => {
+            tracing::warn!(%error, "production health connection test failed");
+            return api_error(StatusCode::UNPROCESSABLE_ENTITY, "production_health_failed")
+                .into_response();
+        }
+    }
+
+    let github = match GitHubAppAuth::new(
+        request.github_app_id,
+        request.github_installation_id,
+        SecretString::from(request.github_private_key.clone()),
+    ) {
+        Ok(auth) => auth.installation_client(&request.repo_name).await,
+        Err(error) => Err(error),
+    };
+    if let Err(error) = github {
+        tracing::warn!(%error, "GitHub setup connection test failed");
+        return api_error(StatusCode::UNPROCESSABLE_ENTITY, "github_connection_failed")
+            .into_response();
+    }
+    let vercel = match VercelClient::new(
+        SecretString::from(request.vercel_token.clone()),
+        Some(request.vercel_team_id.clone()),
+    ) {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::warn!(%error, "Vercel setup configuration failed");
+            return api_error(StatusCode::UNPROCESSABLE_ENTITY, "vercel_connection_failed")
+                .into_response();
+        }
+    };
+    let deployments = match vercel
+        .list_deployments(&request.vercel_project_id, 10)
+        .await
+    {
+        Ok(deployments) => deployments,
+        Err(error) => {
+            tracing::warn!(%error, "Vercel setup connection test failed");
+            return api_error(StatusCode::UNPROCESSABLE_ENTITY, "vercel_connection_failed")
+                .into_response();
+        }
+    };
+    let Some(initial_deployment) = deployments
+        .into_iter()
+        .find(|deployment| deployment.target.as_deref() == Some("production"))
+    else {
+        return api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "vercel_production_deployment_not_found",
+        )
+        .into_response();
+    };
+    let provider: Result<Box<dyn ModelProvider>, _> = match request.provider.as_str() {
+        "openai" => OpenAiProvider::new(
+            SecretString::from(request.provider_api_key.clone()),
+            request.provider_model.clone(),
+        )
+        .map(|value| Box::new(value) as Box<dyn ModelProvider>),
+        "anthropic" => AnthropicProvider::new(
+            SecretString::from(request.provider_api_key.clone()),
+            request.provider_model.clone(),
+        )
+        .map(|value| Box::new(value) as Box<dyn ModelProvider>),
+        "gemini" => GeminiProvider::new(
+            SecretString::from(request.provider_api_key.clone()),
+            request.provider_model.clone(),
+        )
+        .map(|value| Box::new(value) as Box<dyn ModelProvider>),
+        _ => unreachable!("provider was validated"),
+    };
+    let provider = match provider {
+        Ok(provider) => provider,
+        Err(error) => {
+            tracing::warn!(%error, "model provider setup configuration failed");
+            return api_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "provider_connection_failed",
+            )
+            .into_response();
+        }
+    };
+    if let Err(error) = provider.test_connection().await {
+        tracing::warn!(%error, "model provider setup connection test failed");
+        return api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "provider_connection_failed",
+        )
+        .into_response();
+    }
+
+    let encrypt = |value: Value| cipher.encrypt(&SecretString::from(value.to_string()));
+    let provider_key_suffix = request
+        .provider_api_key
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    let github_credentials = match encrypt(json!({
+        "appId": request.github_app_id,
+        "installationId": request.github_installation_id,
+        "privateKey": request.github_private_key,
+        "webhookSecret": request.github_webhook_secret
+    })) {
+        Ok(value) => value,
+        Err(error) => return encryption_error(error),
+    };
+    let vercel_credentials = match encrypt(json!({
+        "token": request.vercel_token,
+        "webhookSecret": request.vercel_webhook_secret
+    })) {
+        Ok(value) => value,
+        Err(error) => return encryption_error(error),
+    };
+    let provider_credentials = match encrypt(json!({ "apiKey": request.provider_api_key })) {
+        Ok(value) => value,
+        Err(error) => return encryption_error(error),
+    };
+    let slug = slugify(&request.name);
+    let safety_mode = if request.safety_mode == "autopilot" {
+        "autopilot_experimental".to_owned()
+    } else {
+        request.safety_mode
+    };
+    let setup = ProtectedAppSetup {
+        name: request.name,
+        slug,
+        repo_owner: request.repo_owner.clone(),
+        repo_name: request.repo_name.clone(),
+        production_url: production_url.to_string(),
+        health_check_url: health_check_url.to_string(),
+        safety_mode,
+        github_external_account_id: request.github_installation_id.to_string(),
+        github_external_project_id: format!("{}/{}", request.repo_owner, request.repo_name),
+        github_credentials,
+        github_metadata: json!({ "repoId": request.github_repo_id, "baseBranch": "main" }),
+        vercel_external_account_id: request.vercel_team_id.clone(),
+        vercel_external_project_id: request.vercel_project_id,
+        vercel_credentials,
+        vercel_metadata: json!({
+            "projectName": request.vercel_project_name,
+            "teamId": request.vercel_team_id
+        }),
+        provider_external_account_id: request.provider.clone(),
+        provider_credentials,
+        provider_metadata: json!({
+            "provider": request.provider,
+            "model": request.provider_model,
+            "keySuffix": provider_key_suffix
+        }),
+        initial_deployment_id: initial_deployment.id,
+        initial_deployment_url: https_url(&initial_deployment.url),
+        initial_deployment_sha: initial_deployment
+            .meta
+            .get("githubCommitSha")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned(),
+    };
+    match database.create_protected_app(&setup).await {
+        Ok(project_id) => (
+            StatusCode::CREATED,
+            Json(json!({ "protected": true, "projectId": project_id })),
+        )
+            .into_response(),
+        Err(nopager_db::DatabaseError::ProjectAlreadyExists) => {
+            api_error(StatusCode::CONFLICT, "app_already_protected").into_response()
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to create protected app");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error").into_response()
+        }
+    }
+}
+
+fn valid_setup(request: &ProtectAppRequest) -> bool {
+    !request.name.trim().is_empty()
+        && request.name.len() <= 100
+        && !request.repo_owner.is_empty()
+        && !request.repo_name.is_empty()
+        && request.github_repo_id > 0
+        && !request.github_private_key.is_empty()
+        && request.github_webhook_secret.len() >= 16
+        && !request.vercel_team_id.is_empty()
+        && !request.vercel_project_id.is_empty()
+        && !request.vercel_project_name.is_empty()
+        && !request.vercel_token.is_empty()
+        && request.vercel_webhook_secret.len() >= 16
+        && matches!(request.provider.as_str(), "openai" | "anthropic" | "gemini")
+        && !request.provider_api_key.is_empty()
+        && !request.provider_model.is_empty()
+        && matches!(request.safety_mode.as_str(), "safe" | "autopilot")
+}
+
+fn slugify(value: &str) -> String {
+    let slug = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    slug.split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+fn https_url(value: &str) -> String {
+    if value.starts_with("https://") {
+        value.to_owned()
+    } else {
+        format!("https://{value}")
+    }
+}
+
+fn encryption_error(error: nopager_crypto::CryptoError) -> Response {
+    tracing::error!(%error, "failed to encrypt setup credentials");
+    api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error").into_response()
+}
+
+async fn create_admin(
+    State(state): State<ServerState>,
+    Json(credentials): Json<AdminCredentials>,
+) -> Response {
+    let Some(database) = &state.database else {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "database_not_configured")
+            .into_response();
+    };
+    if !valid_credentials(&credentials) {
+        return api_error(StatusCode::BAD_REQUEST, "invalid_credentials").into_response();
+    }
+    let password_hash = match hash_password(credentials.password).await {
+        Ok(hash) => hash,
+        Err(error) => {
+            tracing::error!(%error, "failed to hash administrator password");
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error").into_response();
+        }
+    };
+    match database
+        .create_local_admin(&credentials.username, &password_hash)
+        .await
+    {
+        Ok(admin_id) => issue_session(database, admin_id).await,
+        Err(nopager_db::DatabaseError::AdminAlreadyExists) => {
+            api_error(StatusCode::CONFLICT, "admin_already_exists").into_response()
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to create local administrator");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error").into_response()
+        }
+    }
+}
+
+async fn login(
+    State(state): State<ServerState>,
+    Json(credentials): Json<AdminCredentials>,
+) -> Response {
+    let Some(database) = &state.database else {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "database_not_configured")
+            .into_response();
+    };
+    if credentials.password.is_empty() || credentials.password.len() > 1024 {
+        return api_error(StatusCode::UNAUTHORIZED, "invalid_login").into_response();
+    }
+    let stored = match database
+        .local_admin_credentials(&credentials.username)
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(%error, "failed to load local administrator");
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error").into_response();
+        }
+    };
+    let Some((admin_id, password_hash)) = stored else {
+        let _ = hash_password(credentials.password).await;
+        return api_error(StatusCode::UNAUTHORIZED, "invalid_login").into_response();
+    };
+    match verify_password(credentials.password, password_hash).await {
+        Ok(true) => issue_session(database, admin_id).await,
+        Ok(false) => api_error(StatusCode::UNAUTHORIZED, "invalid_login").into_response(),
+        Err(error) => {
+            tracing::error!(%error, "failed to verify administrator password");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error").into_response()
+        }
+    }
+}
+
+async fn pause(State(state): State<ServerState>, headers: HeaderMap) -> (StatusCode, Json<Value>) {
+    set_paused(&state, &headers, true).await
+}
+
+async fn resume(State(state): State<ServerState>, headers: HeaderMap) -> (StatusCode, Json<Value>) {
+    set_paused(&state, &headers, false).await
+}
+
+async fn approve_incident(
+    State(state): State<ServerState>,
+    Path(incident_id): Path<uuid::Uuid>,
+    headers: HeaderMap,
+) -> (StatusCode, Json<Value>) {
+    if !authorized(&state, &headers).await {
+        return api_error(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    let Some(database) = &state.database else {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "database_not_configured");
+    };
+    match database.approve_incident(incident_id, "api-admin").await {
+        Ok(()) => (
+            StatusCode::ACCEPTED,
+            Json(json!({ "approved": true, "incidentId": incident_id })),
+        ),
+        Err(nopager_db::DatabaseError::ProtectionPaused) => {
+            api_error(StatusCode::CONFLICT, "protection_paused")
+        }
+        Err(nopager_db::DatabaseError::IncidentNotAwaitingApproval) => {
+            api_error(StatusCode::CONFLICT, "incident_not_waiting_approval")
+        }
+        Err(error) => {
+            tracing::error!(%incident_id, %error, "failed to approve incident");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
+        }
+    }
+}
+
+async fn reject_incident(
+    State(state): State<ServerState>,
+    Path(incident_id): Path<uuid::Uuid>,
+    headers: HeaderMap,
+) -> (StatusCode, Json<Value>) {
+    if !authorized(&state, &headers).await {
+        return api_error(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    let Some(database) = &state.database else {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "database_not_configured");
+    };
+    match database.reject_incident(incident_id, "api-admin").await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({ "rejected": true, "incidentId": incident_id })),
+        ),
+        Err(nopager_db::DatabaseError::IncidentNotAwaitingApproval) => {
+            api_error(StatusCode::CONFLICT, "incident_not_waiting_approval")
+        }
+        Err(error) => {
+            tracing::error!(%incident_id, %error, "failed to reject incident repair");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
+        }
+    }
+}
+
+async fn set_paused(
+    state: &ServerState,
+    headers: &HeaderMap,
+    paused: bool,
+) -> (StatusCode, Json<Value>) {
+    if !authorized(state, headers).await {
+        return api_error(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    let Some(database) = &state.database else {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "database_not_configured");
+    };
+    match database.set_protection_paused(paused, "api-admin").await {
+        Ok(updated) => (
+            StatusCode::OK,
+            Json(json!({ "protectionPaused": paused, "updatedProjects": updated })),
+        ),
+        Err(error) => {
+            tracing::error!(%error, "failed to update protection state");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
+        }
+    }
+}
+
+async fn authorized(state: &ServerState, headers: &HeaderMap) -> bool {
+    use subtle::ConstantTimeEq;
+    if let (Some(expected), Some(value)) = (
+        &state.admin_token,
+        header(headers, "authorization").and_then(|value| value.strip_prefix("Bearer ")),
+    ) && bool::from(value.as_bytes().ct_eq(expected.as_ref()))
+    {
+        return true;
+    }
+    let Some(token) = cookie(headers, "nopager_session") else {
+        return false;
+    };
+    let Some(database) = &state.database else {
+        return false;
+    };
+    let hash = Sha256::digest(token.as_bytes());
+    database.admin_session_valid(&hash).await.unwrap_or(false)
+}
+
+fn valid_credentials(credentials: &AdminCredentials) -> bool {
+    (3..=64).contains(&credentials.username.len())
+        && credentials
+            .username
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+        && (12..=1024).contains(&credentials.password.len())
+}
+
+async fn hash_password(password: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let salt = SaltString::generate(&mut OsRng);
+        Argon2::default()
+            .hash_password(password.as_bytes(), &salt)
+            .map(|hash| hash.to_string())
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+async fn verify_password(password: String, encoded: String) -> Result<bool, String> {
+    tokio::task::spawn_blocking(move || {
+        let parsed = PasswordHash::new(&encoded).map_err(|error| error.to_string())?;
+        Ok(Argon2::default()
+            .verify_password(password.as_bytes(), &parsed)
+            .is_ok())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+async fn issue_session(database: &Database, admin_id: uuid::Uuid) -> Response {
+    let mut token = [0_u8; 32];
+    rand::rng().fill_bytes(&mut token);
+    let token = URL_SAFE_NO_PAD.encode(token);
+    let hash = Sha256::digest(token.as_bytes());
+    let expires_at = OffsetDateTime::now_utc() + TimeDuration::hours(24);
+    if let Err(error) = database
+        .create_admin_session(admin_id, &hash, expires_at)
+        .await
+    {
+        tracing::error!(%error, "failed to create administrator session");
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error").into_response();
+    }
+    let mut headers = HeaderMap::new();
+    let secure = std::env::var("NOPAGER_COOKIE_SECURE").is_ok_and(|value| value == "true");
+    let cookie = format!(
+        "nopager_session={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400{}",
+        if secure { "; Secure" } else { "" }
+    );
+    headers.insert(
+        SET_COOKIE,
+        cookie.parse().expect("session cookie is a valid header"),
+    );
+    (
+        StatusCode::CREATED,
+        headers,
+        Json(json!({ "authenticated": true })),
+    )
+        .into_response()
+}
+
+fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    header(headers, "cookie")?
+        .split(';')
+        .map(str::trim)
+        .find_map(|pair| {
+            pair.split_once('=')
+                .filter(|(key, _)| *key == name)
+                .map(|(_, value)| value)
+        })
+}
+
+async fn github_webhook(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> (StatusCode, Json<Value>) {
+    let Some(secret) = webhook_secret(&state, "github").await else {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "integration_not_configured",
+        );
+    };
+    let Some(signature) = header(&headers, "x-hub-signature-256") else {
+        return api_error(StatusCode::UNAUTHORIZED, "invalid_signature");
+    };
+    if verify_github(&secret, &body, signature).is_err() {
+        return api_error(StatusCode::UNAUTHORIZED, "invalid_signature");
+    }
+    let Some(delivery_id) = header(&headers, "x-github-delivery") else {
+        return api_error(StatusCode::BAD_REQUEST, "missing_delivery_id");
+    };
+    let event_type = header(&headers, "x-github-event").unwrap_or("unknown");
+    let payload: Value = match serde_json::from_slice(&body) {
+        Ok(payload) => payload,
+        Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid_json"),
+    };
+    accept_webhook(&state, "github", delivery_id, event_type, payload).await
+}
+
+async fn vercel_webhook(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> (StatusCode, Json<Value>) {
+    let Some(secret) = webhook_secret(&state, "vercel").await else {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "integration_not_configured",
+        );
+    };
+    let Some(signature) = header(&headers, "x-vercel-signature") else {
+        return api_error(StatusCode::UNAUTHORIZED, "invalid_signature");
+    };
+    if verify_vercel(&secret, &body, signature).is_err() {
+        return api_error(StatusCode::UNAUTHORIZED, "invalid_signature");
+    }
+    let payload: Value = match serde_json::from_slice(&body) {
+        Ok(payload) => payload,
+        Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid_json"),
+    };
+    let event_type = payload
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_owned();
+    // Vercel does not provide a universal delivery-id header. Its HMAC covers
+    // the raw body, making the signature a stable, tamper-resistant dedup key.
+    accept_webhook(&state, "vercel", signature, &event_type, payload).await
+}
+
+async fn webhook_secret(state: &ServerState, kind: &str) -> Option<Vec<u8>> {
+    let configured = match kind {
+        "github" => &state.github_webhook_secret,
+        "vercel" => &state.vercel_webhook_secret,
+        _ => return None,
+    };
+    if let Some(secret) = configured {
+        return Some(secret.to_vec());
+    }
+    let database = state.database.as_ref()?;
+    let cipher = state.secret_cipher.as_ref()?;
+    let integration = database.single_integration_secret(kind).await.ok()??;
+    let plaintext = cipher.decrypt(&integration.encrypted_credentials).ok()?;
+    let credentials: Value = serde_json::from_str(plaintext.expose_secret()).ok()?;
+    credentials
+        .get("webhookSecret")
+        .and_then(Value::as_str)
+        .map(|value| value.as_bytes().to_vec())
+}
+
+async fn accept_webhook(
+    state: &ServerState,
+    provider: &str,
+    delivery_id: &str,
+    event_type: &str,
+    payload: Value,
+) -> (StatusCode, Json<Value>) {
+    let Some(database) = &state.database else {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "database_not_configured");
+    };
+    match database
+        .accept_webhook(
+            provider,
+            delivery_id,
+            event_type,
+            &json!({ "eventType": event_type, "payload": payload }),
+        )
+        .await
+    {
+        Ok(true) => (StatusCode::ACCEPTED, Json(json!({ "accepted": true }))),
+        Ok(false) => (
+            StatusCode::OK,
+            Json(json!({ "accepted": true, "duplicate": true })),
+        ),
+        Err(error) => {
+            tracing::error!(%provider, %event_type, %error, "failed to persist webhook");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
+        }
+    }
+}
+
+fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(name)?.to_str().ok()
+}
+
+fn api_error(status: StatusCode, code: &'static str) -> (StatusCode, Json<Value>) {
+    (status, Json(json!({ "error": code })))
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .json()
+        .init();
+
+    let config = ServerConfig::from_env()?;
+    let database = match std::env::var("DATABASE_URL") {
+        Ok(url) => {
+            let database = Database::connect(&url).await?;
+            database.migrate().await?;
+            Some(database)
+        }
+        Err(_) => {
+            tracing::warn!(
+                "DATABASE_URL is not set; API readiness and persistent features are disabled"
+            );
+            None
+        }
+    };
+    let state = ServerState {
+        database,
+        github_webhook_secret: secret_from_env("GITHUB_WEBHOOK_SECRET"),
+        vercel_webhook_secret: secret_from_env("VERCEL_WEBHOOK_SECRET"),
+        admin_token: secret_from_env("NOPAGER_ADMIN_TOKEN"),
+        secret_cipher: match std::env::var("NOPAGER_MASTER_KEY") {
+            Ok(key) => Some(Arc::new(SecretCipher::from_base64_key(
+                &SecretString::from(key),
+            )?)),
+            Err(_) => {
+                tracing::warn!(
+                    "NOPAGER_MASTER_KEY is not set; setup credential storage is disabled"
+                );
+                None
+            }
+        },
+    };
+    let app = Router::new()
+        .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
+        .route("/api/v1/overview", get(overview))
+        .route("/api/v1/incidents", get(incidents))
+        .route("/api/v1/incidents/{id}", get(incident_detail))
+        .route("/api/v1/settings", get(settings))
+        .route("/api/v1/setup/status", get(setup_status))
+        .route("/api/v1/setup/admin", post(create_admin))
+        .route("/api/v1/setup/test/github", post(test_github_connection))
+        .route("/api/v1/setup/test/vercel", post(test_vercel_connection))
+        .route(
+            "/api/v1/setup/test/provider",
+            post(test_provider_connection),
+        )
+        .route("/api/v1/setup/test/health", post(test_health_connection))
+        .route("/api/v1/setup/app", post(protect_app))
+        .route("/api/v1/auth/login", post(login))
+        .route("/api/v1/protection/pause", post(pause))
+        .route("/api/v1/protection/resume", post(resume))
+        .route("/api/v1/safety/mode", post(set_safety_mode))
+        .route("/api/v1/incidents/{id}/approve", post(approve_incident))
+        .route("/api/v1/incidents/{id}/reject", post(reject_incident))
+        .route("/api/v1/integrations/github/webhook", post(github_webhook))
+        .route("/api/v1/integrations/vercel/webhook", post(vercel_webhook))
+        .layer(DefaultBodyLimit::max(1024 * 1024))
+        .layer(TraceLayer::new_for_http())
+        .with_state(state);
+
+    let listener = tokio::net::TcpListener::bind(config.address).await?;
+    info!(address = %config.address, "NoPager API listening");
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+    Ok(())
+}
+
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+}
+
+fn secret_from_env(name: &str) -> Option<Arc<[u8]>> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(|value| Arc::from(value.into_bytes()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state() -> ServerState {
+        ServerState {
+            database: None,
+            github_webhook_secret: None,
+            vercel_webhook_secret: None,
+            admin_token: Some(Arc::from(b"test-admin-token".as_slice())),
+            secret_cipher: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn mutation_auth_requires_exact_bearer_token() {
+        let mut headers = HeaderMap::new();
+        assert!(!authorized(&state(), &headers).await);
+        headers.insert("authorization", "Bearer wrong".parse().unwrap());
+        assert!(!authorized(&state(), &headers).await);
+        headers.insert("authorization", "Bearer test-admin-token".parse().unwrap());
+        assert!(authorized(&state(), &headers).await);
+    }
+}

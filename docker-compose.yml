@@ -1,0 +1,90 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: nopager
+      POSTGRES_USER: nopager
+      POSTGRES_PASSWORD: nopager
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nopager"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - nopager-postgres:/var/lib/postgresql/data
+
+  server:
+    build:
+      context: .
+      dockerfile: docker/server.Dockerfile
+    environment:
+      NOPAGER_SERVER_ADDR: 0.0.0.0:8080
+      DATABASE_URL: postgresql://nopager:nopager@postgres:5432/nopager
+      NOPAGER_MASTER_KEY: ${NOPAGER_MASTER_KEY:?set NOPAGER_MASTER_KEY}
+      NOPAGER_ADMIN_TOKEN: ${NOPAGER_ADMIN_TOKEN:-}
+      NOPAGER_COOKIE_SECURE: ${NOPAGER_COOKIE_SECURE:-false}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
+      VERCEL_WEBHOOK_SECRET: ${VERCEL_WEBHOOK_SECRET:-}
+      RUST_LOG: ${RUST_LOG:-info}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  workspaces-init:
+    image: alpine:3.22
+    command: ["sh", "-c", "chown -R 10001:10001 /workspaces"]
+    volumes:
+      - nopager-workspaces:/workspaces
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/worker.Dockerfile
+    environment:
+      DATABASE_URL: postgresql://nopager:nopager@postgres:5432/nopager
+      NOPAGER_MASTER_KEY: ${NOPAGER_MASTER_KEY:?set NOPAGER_MASTER_KEY}
+      NOPAGER_AI_PROVIDER: ${NOPAGER_AI_PROVIDER:-openai}
+      NOPAGER_AI_MODEL: ${NOPAGER_AI_MODEL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_INSTALLATION_ID: ${GITHUB_INSTALLATION_ID:-}
+      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
+      VERCEL_TOKEN: ${VERCEL_TOKEN:-}
+      VERCEL_TEAM_ID: ${VERCEL_TEAM_ID:-}
+      NOPAGER_WORK_ROOT: /workspaces
+      NOPAGER_SANDBOX_VOLUME: nopager-workspaces
+      SANDBOX_UID_GID: 10001:10001
+      SANDBOX_MAX_CPU: ${SANDBOX_MAX_CPU:-2}
+      SANDBOX_MAX_MEMORY_MB: ${SANDBOX_MAX_MEMORY_MB:-4096}
+      SANDBOX_TIMEOUT_SECONDS: ${SANDBOX_TIMEOUT_SECONDS:-900}
+      RUST_LOG: ${RUST_LOG:-info}
+    group_add:
+      - ${DOCKER_GID:-999}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - nopager-workspaces:/workspaces
+    depends_on:
+      postgres:
+        condition: service_healthy
+      workspaces-init:
+        condition: service_completed_successfully
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+    environment:
+      NOPAGER_API_URL: http://server:8080
+    ports:
+      - "3000:3000"
+    depends_on:
+      - server
+
+volumes:
+  nopager-postgres:
+  nopager-workspaces:
+    name: nopager-workspaces

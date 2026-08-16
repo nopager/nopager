@@ -1,0 +1,15 @@
+[package]
+name = "nopager-crypto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+base64.workspace = true
+chacha20poly1305.workspace = true
+rand.workspace = true
+secrecy.workspace = true
+thiserror.workspace = true
+
