@@ -44,6 +44,7 @@ jobs:
 
           path = Path('.env')
           values = {
+              'POSTGRES_PASSWORD': 'ci-private-postgres-password',
               'NOPAGER_MASTER_KEY': 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=',
               'NOPAGER_ADMIN_TOKEN': 'ci-smoke-operator-token',
               'NOPAGER_WEB_BIND': '127.0.0.1',
