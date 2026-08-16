@@ -14,33 +14,52 @@ export function SafetyControls({
   const [paused, setPaused] = useState(initialPaused);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
   async function mutate(path: string, body?: object) {
     setBusy(true);
     setError("");
-    const response = await fetch(`/api/nopager/${path}`, {
-      method: "POST",
-      headers: body ? { "content-type": "application/json" } : undefined,
-      body: body ? JSON.stringify(body) : undefined,
-    });
-    if (!response.ok) {
-      const value = (await response.json().catch(() => ({}))) as {
-        error?: string;
-      };
-      setError(value.error?.replaceAll("_", " ") ?? "Change failed");
-      setBusy(false);
+    try {
+      const response = await fetch(`/api/nopager/${path}`, {
+        method: "POST",
+        headers: body ? { "content-type": "application/json" } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      if (!response.ok) {
+        const value = (await response.json().catch(() => ({}))) as {
+          error?: string;
+        };
+        setError(value.error?.replaceAll("_", " ") ?? "Change failed");
+        return false;
+      }
+      return true;
+    } catch {
+      setError("NoPager could not be reached. No safety setting was changed.");
       return false;
+    } finally {
+      setBusy(false);
     }
-    setBusy(false);
-    return true;
   }
+
   async function changeMode(next: string) {
-    if (await mutate("safety/mode", { mode: next }))
+    if (
+      next === "autopilot" &&
+      !window.confirm(
+        "Enable Autopilot Experimental? Only low-risk, verified, reversible production actions may run without approval. High-risk actions remain blocked.",
+      )
+    ) {
+      return;
+    }
+    if (await mutate("safety/mode", { mode: next })) {
       setMode(next === "autopilot" ? "autopilot_experimental" : next);
+    }
   }
+
   async function changePaused(next: boolean) {
-    if (await mutate(next ? "protection/pause" : "protection/resume"))
+    if (await mutate(next ? "protection/pause" : "protection/resume")) {
       setPaused(next);
+    }
   }
+
   return (
     <>
       {paused && (
@@ -58,7 +77,7 @@ export function SafetyControls({
             disabled={busy}
             onClick={() => changePaused(false)}
           >
-            Resume protection
+            {busy ? "Working…" : "Resume protection"}
           </button>
         </div>
       )}
@@ -144,7 +163,7 @@ export function SafetyControls({
               disabled={paused || busy}
               onClick={() => changePaused(true)}
             >
-              {paused ? "Protection is paused" : "Pause all actions"}
+              {killSwitchLabel(paused, busy)}
             </button>
             <small>This action is recorded in the audit log.</small>
           </Card>
@@ -152,4 +171,10 @@ export function SafetyControls({
       </div>
     </>
   );
+}
+
+function killSwitchLabel(paused: boolean, busy: boolean) {
+  if (paused) return "Protection is paused";
+  if (busy) return "Working…";
+  return "Pause all actions";
 }

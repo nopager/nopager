@@ -1,10 +1,28 @@
+import Link from "next/link";
 import { Card, IncidentLink, PageHeader, StatusBadge } from "@/components/ui";
 import { api, type IncidentSummary } from "@/lib/api";
 import { projectIncidentState } from "@/lib/model";
 
 export default async function IncidentsPage() {
   const result = await api<{ incidents: IncidentSummary[] }>("incidents");
-  const incidents = result?.incidents ?? [];
+  if (!result) {
+    return (
+      <div className="page">
+        <PageHeader
+          eyebrow="Incident history"
+          title="Incident history unavailable"
+          description="Sign in or complete setup before viewing production incident records."
+          action={
+            <Link className="primary-button link-button" href="/setup">
+              Open setup
+            </Link>
+          }
+        />
+      </div>
+    );
+  }
+
+  const incidents = result.incidents;
   return (
     <div className="page">
       <PageHeader

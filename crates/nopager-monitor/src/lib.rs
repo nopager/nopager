@@ -129,6 +129,10 @@ pub fn validate_health_url(url: &Url) -> Result<(), UrlSafetyError> {
 }
 
 pub fn validate_public_ip(ip: IpAddr) -> Result<(), UrlSafetyError> {
+    // Keep this denylist conservative for an SSRF boundary. It covers private,
+    // loopback, link-local, shared, benchmarking, documentation, translation,
+    // multicast, reserved, and other non-public/special-use ranges that should
+    // never be valid production health-check destinations.
     const BLOCKED: &[&str] = &[
         "0.0.0.0/8",
         "10.0.0.0/8",
@@ -136,10 +140,29 @@ pub fn validate_public_ip(ip: IpAddr) -> Result<(), UrlSafetyError> {
         "127.0.0.0/8",
         "169.254.0.0/16",
         "172.16.0.0/12",
+        "192.0.0.0/24",
+        "192.0.2.0/24",
+        "192.88.99.0/24",
         "192.168.0.0/16",
+        "198.18.0.0/15",
+        "198.51.100.0/24",
+        "203.0.113.0/24",
         "224.0.0.0/4",
+        "240.0.0.0/4",
         "::/128",
         "::1/128",
+        "::ffff:0:0/96",
+        "64:ff9b::/96",
+        "64:ff9b:1::/48",
+        "100::/64",
+        "100:0:0:1::/64",
+        "2001::/32",
+        "2001:2::/48",
+        "2001:10::/28",
+        "2001:db8::/32",
+        "2002::/16",
+        "3fff::/20",
+        "5f00::/16",
         "fc00::/7",
         "fe80::/10",
         "ff00::/8",
@@ -195,6 +218,9 @@ pub async fn check_http(
     {
         let resolved: Vec<SocketAddr> = tokio::net::lookup_host((host, port)).await?.collect();
         validate_resolved_addresses(resolved.iter().map(SocketAddr::ip))?;
+        // Pin the connection to the addresses we just validated. This prevents
+        // a second DNS resolution from turning the validation/request gap into
+        // a DNS-rebinding SSRF bypass.
         builder = builder.resolve_to_addrs(host, &resolved);
     }
     let client = builder.build()?;
@@ -241,6 +267,8 @@ mod tests {
     #[test]
     fn accepts_public_https_url() {
         assert!(validate_health_url(&Url::parse("https://example.com/health").unwrap()).is_ok());
+        assert!(validate_public_ip("93.184.216.34".parse().unwrap()).is_ok());
+        assert!(validate_public_ip("2606:2800:220:1:248:1893:25c8:1946".parse().unwrap()).is_ok());
     }
 
     #[test]
@@ -255,6 +283,29 @@ mod tests {
             assert!(
                 validate_health_url(&Url::parse(target).unwrap()).is_err(),
                 "{target}"
+            );
+        }
+    }
+
+    #[test]
+    fn blocks_non_public_special_use_addresses() {
+        for address in [
+            "192.0.2.1",
+            "198.18.0.1",
+            "198.51.100.2",
+            "203.0.113.3",
+            "250.1.2.3",
+            "::ffff:192.0.2.1",
+            "64:ff9b::c000:0201",
+            "2001:2::1",
+            "2001:db8::1",
+            "3fff::1",
+            "5f00::1",
+        ] {
+            assert_eq!(
+                validate_public_ip(address.parse().unwrap()),
+                Err(UrlSafetyError::NonPublicTarget),
+                "{address}"
             );
         }
     }

@@ -1,5 +1,6 @@
 #!/usr/bin/env sh
 set -eu
+umask 077
 
 fail() {
   printf 'NoPager quickstart: %s\n' "$1" >&2
@@ -14,6 +15,7 @@ if [ ! -f .env ]; then
   cp .env.example .env
   printf 'Created .env from .env.example\n'
 fi
+chmod 600 .env
 
 set_env() {
   key=$1
@@ -26,6 +28,7 @@ set_env() {
     END { if (!found) print key "=" value }
   ' .env > "$tmp"
   mv "$tmp" .env
+  chmod 600 .env
 }
 
 read_env() {
@@ -44,6 +47,31 @@ generate_secret() {
     fail "OpenSSL or Python 3 is required once to generate NoPager secrets."
   fi
 }
+
+generate_uri_secret() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 32 | tr -d '\n'
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import secrets; print(secrets.token_hex(32))'
+  else
+    fail "OpenSSL or Python 3 is required once to generate the PostgreSQL password."
+  fi
+}
+
+current_postgres_password=$(read_env POSTGRES_PASSWORD)
+if [ -z "$current_postgres_password" ]; then
+  legacy_database_url=$(read_env DATABASE_URL)
+  case "$legacy_database_url" in
+    postgresql://nopager:nopager@postgres:*)
+      set_env POSTGRES_PASSWORD nopager
+      printf 'Preserved legacy Alpha PostgreSQL password for the existing Docker volume.\n' >&2
+      ;;
+    *)
+      set_env POSTGRES_PASSWORD "$(generate_uri_secret)"
+      printf 'Generated POSTGRES_PASSWORD\n'
+      ;;
+  esac
+fi
 
 current_master_key=$(read_env NOPAGER_MASTER_KEY)
 if [ -z "$current_master_key" ]; then
@@ -100,4 +128,5 @@ printf 'Console: http://localhost:%s/setup\n' "$web_port"
 printf 'Local API health: http://127.0.0.1:%s/healthz\n' "$api_port"
 printf '\nNext: open the console and complete GitHub, Vercel, AI provider, and health-check setup.\n'
 printf 'CLI/operator commands read NOPAGER_ADMIN_TOKEN from .env automatically.\n'
+printf 'Back up .env together with the PostgreSQL volume; losing NOPAGER_MASTER_KEY makes encrypted integration credentials unrecoverable.\n'
 printf 'Logs: docker compose logs -f server worker web\n'

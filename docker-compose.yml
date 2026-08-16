@@ -1,11 +1,23 @@
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-read-only-app: &read-only-app
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m
+
 services:
   postgres:
     image: postgres:17-alpine
     restart: unless-stopped
+    logging: *default-logging
     environment:
       POSTGRES_DB: nopager
       POSTGRES_USER: nopager
-      POSTGRES_PASSWORD: nopager
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U nopager"]
       interval: 5s
@@ -13,20 +25,26 @@ services:
       retries: 10
     volumes:
       - nopager-postgres:/var/lib/postgresql/data
+    networks:
+      - backend
 
   server:
+    <<: *read-only-app
     build:
       context: .
       dockerfile: docker/server.Dockerfile
     restart: unless-stopped
     init: true
+    stop_signal: SIGINT
+    stop_grace_period: 30s
+    logging: *default-logging
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
     environment:
       NOPAGER_SERVER_ADDR: 0.0.0.0:8080
-      DATABASE_URL: postgresql://nopager:nopager@postgres:5432/nopager
+      DATABASE_URL: postgresql://nopager:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/nopager
       NOPAGER_MASTER_KEY: ${NOPAGER_MASTER_KEY:?set NOPAGER_MASTER_KEY}
       NOPAGER_ADMIN_TOKEN: ${NOPAGER_ADMIN_TOKEN:-}
       NOPAGER_COOKIE_SECURE: ${NOPAGER_COOKIE_SECURE:-false}
@@ -38,25 +56,34 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    networks:
+      - frontend
+      - backend
 
   workspaces-init:
     image: alpine:3.22
     command: ["sh", "-c", "chown -R 10001:10001 /workspaces"]
+    network_mode: none
+    logging: *default-logging
     volumes:
       - nopager-workspaces:/workspaces
 
   worker:
+    <<: *read-only-app
     build:
       context: .
       dockerfile: docker/worker.Dockerfile
     restart: unless-stopped
     init: true
+    stop_grace_period: 30s
+    logging: *default-logging
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
     environment:
-      DATABASE_URL: postgresql://nopager:nopager@postgres:5432/nopager
+      HOME: /tmp
+      DATABASE_URL: postgresql://nopager:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/nopager
       NOPAGER_MASTER_KEY: ${NOPAGER_MASTER_KEY:?set NOPAGER_MASTER_KEY}
       NOPAGER_AI_PROVIDER: ${NOPAGER_AI_PROVIDER:-openai}
       NOPAGER_AI_MODEL: ${NOPAGER_AI_MODEL:-}
@@ -85,23 +112,35 @@ services:
         condition: service_healthy
       workspaces-init:
         condition: service_completed_successfully
+    networks:
+      - backend
 
   web:
+    <<: *read-only-app
     build:
       context: .
       dockerfile: docker/web.Dockerfile
     restart: unless-stopped
     init: true
+    stop_grace_period: 30s
+    logging: *default-logging
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
     environment:
+      HOME: /tmp
       NOPAGER_API_URL: http://server:8080
     ports:
       - "${NOPAGER_WEB_BIND:-127.0.0.1}:${NOPAGER_WEB_PORT:-3000}:3000"
     depends_on:
       - server
+    networks:
+      - frontend
+
+networks:
+  frontend:
+  backend:
 
 volumes:
   nopager-postgres:

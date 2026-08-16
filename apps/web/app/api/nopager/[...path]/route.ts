@@ -18,15 +18,25 @@ function sameOriginMutation(request: NextRequest) {
   }
 }
 
+function privateNoStoreHeaders(contentType = "application/json") {
+  return new Headers({
+    "content-type": contentType,
+    "cache-control": "private, no-store, max-age=0",
+    pragma: "no-cache",
+    expires: "0",
+  });
+}
+
+function jsonError(error: string, status: number) {
+  return Response.json({ error }, { status, headers: privateNoStoreHeaders() });
+}
+
 async function proxy(
   request: NextRequest,
   context: { params: Promise<{ path: string[] }> },
 ) {
   if (!sameOriginMutation(request)) {
-    return Response.json(
-      { error: "cross_origin_mutation_blocked" },
-      { status: 403 },
-    );
+    return jsonError("cross_origin_mutation_blocked", 403);
   }
 
   const { path } = await context.params;
@@ -45,9 +55,7 @@ async function proxy(
   let body: Uint8Array | undefined;
   if (request.method !== "GET" && request.method !== "HEAD") {
     const boundedBody = await readBoundedBody(request, MAX_BODY_BYTES);
-    if (!boundedBody) {
-      return Response.json({ error: "payload_too_large" }, { status: 413 });
-    }
+    if (!boundedBody) return jsonError("payload_too_large", 413);
     body = boundedBody;
   }
 
@@ -60,11 +68,11 @@ async function proxy(
       cache: "no-store",
     });
   } catch {
-    return Response.json({ error: "api_unavailable" }, { status: 503 });
+    return jsonError("api_unavailable", 503);
   }
-  const responseHeaders = new Headers({
-    "content-type": upstream.headers.get("content-type") ?? "application/json",
-  });
+  const responseHeaders = privateNoStoreHeaders(
+    upstream.headers.get("content-type") ?? "application/json",
+  );
   const setCookie = upstream.headers.get("set-cookie");
   if (setCookie) responseHeaders.set("set-cookie", setCookie);
   return new Response(upstream.body, {

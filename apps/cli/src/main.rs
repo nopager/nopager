@@ -1,6 +1,12 @@
-use std::{fs, process::Command as ProcessCommand};
+use std::{fs, path::Path, process::Command as ProcessCommand};
 
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use clap::{Parser, Subcommand};
 use rand::RngCore;
 use reqwest::StatusCode;
@@ -49,29 +55,55 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn init() -> anyhow::Result<()> {
+    let mut postgres = [0_u8; 32];
     let mut master = [0_u8; 32];
     let mut admin = [0_u8; 32];
+    rand::rng().fill_bytes(&mut postgres);
     rand::rng().fill_bytes(&mut master);
     rand::rng().fill_bytes(&mut admin);
     let existing = match fs::read_to_string(".env") {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            "DATABASE_URL=postgresql://nopager:nopager@localhost:5432/nopager\nNOPAGER_API_URL=http://localhost:8080/\n".into()
+            "NOPAGER_API_URL=http://localhost:8080/\n".into()
         }
         Err(error) => return Err(error.into()),
     };
+    let legacy_database = uses_legacy_compose_database(&existing);
+    let postgres_password = if legacy_database {
+        "nopager".to_owned()
+    } else {
+        URL_SAFE_NO_PAD.encode(postgres)
+    };
+    let (contents, postgres_changed) =
+        fill_blank_env(existing, "POSTGRES_PASSWORD", &postgres_password);
     let (contents, master_changed) =
-        fill_blank_env(existing, "NOPAGER_MASTER_KEY", &STANDARD.encode(master));
+        fill_blank_env(contents, "NOPAGER_MASTER_KEY", &STANDARD.encode(master));
     let (contents, admin_changed) =
         fill_blank_env(contents, "NOPAGER_ADMIN_TOKEN", &STANDARD.encode(admin));
-    if master_changed || admin_changed || !std::path::Path::new(".env").exists() {
-        fs::write(".env", contents)?;
-        println!("Created or completed .env with fresh local secrets.");
+    let env_path = Path::new(".env");
+    if postgres_changed || master_changed || admin_changed || !env_path.exists() {
+        fs::write(env_path, contents)?;
+        println!("Created or completed .env with local secrets.");
+        if legacy_database && postgres_changed {
+            eprintln!(
+                "Preserved the legacy Alpha PostgreSQL password so the existing Docker volume remains bootable."
+            );
+        }
     } else {
         println!(".env already contains local secrets; left them unchanged.");
     }
+    secure_env_permissions(env_path)?;
     println!("Continue setup at {}/setup", web_url());
     Ok(())
+}
+
+fn uses_legacy_compose_database(contents: &str) -> bool {
+    !contents.lines().any(|line| {
+        line.starts_with("POSTGRES_PASSWORD=") && line.len() > "POSTGRES_PASSWORD=".len()
+    }) && contents.lines().any(|line| {
+        line.trim()
+            .starts_with("DATABASE_URL=postgresql://nopager:nopager@postgres:")
+    })
 }
 
 fn fill_blank_env(mut contents: String, name: &str, value: &str) -> (String, bool) {
@@ -107,6 +139,28 @@ fn fill_blank_env(mut contents: String, name: &str, value: &str) -> (String, boo
     (contents, changed)
 }
 
+#[cfg(unix)]
+fn secure_env_permissions(path: &Path) -> std::io::Result<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn secure_env_permissions(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn env_permissions_private(path: &Path) -> bool {
+    fs::metadata(path)
+        .map(|metadata| metadata.permissions().mode() & 0o077 == 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn env_permissions_private(path: &Path) -> bool {
+    path.exists()
+}
+
 async fn doctor() -> anyhow::Result<()> {
     let mut healthy = true;
 
@@ -123,13 +177,24 @@ async fn doctor() -> anyhow::Result<()> {
         }
     }
 
-    for variable in ["DATABASE_URL", "NOPAGER_MASTER_KEY", "NOPAGER_ADMIN_TOKEN"] {
+    for variable in [
+        "POSTGRES_PASSWORD",
+        "NOPAGER_MASTER_KEY",
+        "NOPAGER_ADMIN_TOKEN",
+    ] {
         if env_value(variable).is_some_and(|value| !value.trim().is_empty()) {
             println!("✓ {variable} is configured");
         } else {
             healthy = false;
             eprintln!("✗ {variable} is missing");
         }
+    }
+
+    if env_permissions_private(Path::new(".env")) {
+        println!("✓ .env permissions are private");
+    } else {
+        healthy = false;
+        eprintln!("✗ .env is missing or readable by other local users");
     }
 
     match client().get(api_url("readyz")?).send().await {
@@ -275,16 +340,33 @@ mod tests {
     #[test]
     fn init_fills_blank_secrets_without_replacing_existing_values() {
         let (contents, changed) = fill_blank_env(
-            "NOPAGER_MASTER_KEY=\nNOPAGER_ADMIN_TOKEN=keep-me\n".into(),
-            "NOPAGER_MASTER_KEY",
-            "generated",
+            "POSTGRES_PASSWORD=\nNOPAGER_MASTER_KEY=\nNOPAGER_ADMIN_TOKEN=keep-me\n".into(),
+            "POSTGRES_PASSWORD",
+            "db-generated",
         );
         assert!(changed);
-        assert!(contents.contains("NOPAGER_MASTER_KEY=generated"));
+        assert!(contents.contains("POSTGRES_PASSWORD=db-generated"));
+        let (contents, changed) =
+            fill_blank_env(contents, "NOPAGER_MASTER_KEY", "master-generated");
+        assert!(changed);
+        assert!(contents.contains("NOPAGER_MASTER_KEY=master-generated"));
         let (contents, changed) = fill_blank_env(contents, "NOPAGER_ADMIN_TOKEN", "replacement");
         assert!(!changed);
         assert!(contents.contains("NOPAGER_ADMIN_TOKEN=keep-me"));
         assert!(!contents.contains("replacement"));
+    }
+
+    #[test]
+    fn detects_legacy_compose_database_without_new_password() {
+        assert!(uses_legacy_compose_database(
+            "DATABASE_URL=postgresql://nopager:nopager@postgres:5432/nopager\n"
+        ));
+        assert!(!uses_legacy_compose_database(
+            "POSTGRES_PASSWORD=random\nDATABASE_URL=postgresql://nopager:nopager@postgres:5432/nopager\n"
+        ));
+        assert!(!uses_legacy_compose_database(
+            "DATABASE_URL=postgresql://nopager:nopager@localhost:5432/nopager\n"
+        ));
     }
 
     #[test]
