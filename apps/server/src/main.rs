@@ -442,19 +442,6 @@ fn configured_provider(
     }
 }
 
-fn connection_result<E: std::fmt::Display>(
-    result: Result<(), E>,
-    error_code: &'static str,
-) -> (StatusCode, Json<Value>) {
-    match result {
-        Ok(()) => connection_success(),
-        Err(error) => {
-            tracing::warn!(%error, "setup connection test failed");
-            api_error(StatusCode::UNPROCESSABLE_ENTITY, error_code)
-        }
-    }
-}
-
 fn connection_success() -> (StatusCode, Json<Value>) {
     (StatusCode::OK, Json(json!({ "connected": true })))
 }
