@@ -517,6 +517,12 @@ mod tests {
         }
     }
 
+    fn absolute_workspace() -> PathBuf {
+        std::env::temp_dir()
+            .join("nopager-sandbox-test")
+            .join("incident")
+    }
+
     #[test]
     fn permits_deterministic_project_commands() {
         assert_eq!(command("pnpm", &["test"]).validate(), Ok(()));
@@ -555,7 +561,7 @@ mod tests {
     fn docker_is_hardened_and_never_mounts_the_socket() {
         let sandbox = DockerSandbox::new(
             PathBuf::from("docker"),
-            PathBuf::from("C:\\sandbox\\incident"),
+            absolute_workspace(),
             "rust:1.92-bookworm".into(),
             Duration::from_secs(60),
             4096,
@@ -586,7 +592,7 @@ mod tests {
     fn volume_mount_is_scoped_to_one_incident_workspace() {
         let sandbox = DockerSandbox::new(
             PathBuf::from("docker"),
-            PathBuf::from("C:\\sandbox\\incident"),
+            absolute_workspace(),
             "node:24-bookworm".into(),
             Duration::from_secs(60),
             2048,
