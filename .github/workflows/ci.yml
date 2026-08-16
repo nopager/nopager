@@ -104,6 +104,31 @@ jobs:
             docker compose logs --no-color web server
             exit 1
           }
+      - name: Exercise first-admin bootstrap through web origin
+        run: |
+          rm -f /tmp/nopager.cookies /tmp/nopager.headers /tmp/nopager-status.json
+          curl --fail --show-error --silent \
+            -D /tmp/nopager.headers \
+            -c /tmp/nopager.cookies \
+            -H 'content-type: application/json' \
+            -X POST \
+            --data '{"username":"admin","password":"correct-horse-battery-staple"}' \
+            http://127.0.0.1:3000/api/nopager/setup/admin >/dev/null
+          grep -qi 'httponly' /tmp/nopager.headers
+          grep -qi 'samesite=strict' /tmp/nopager.headers
+          curl --fail --show-error --silent \
+            -b /tmp/nopager.cookies \
+            http://127.0.0.1:3000/api/nopager/setup/status \
+            -o /tmp/nopager-status.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          status = json.loads(Path('/tmp/nopager-status.json').read_text())
+          assert status['adminCreated'] is True
+          assert status['authenticated'] is True
+          assert status['appProtected'] is False
+          PY
       - name: Show service status
         run: docker compose ps
       - name: Tear down smoke stack
