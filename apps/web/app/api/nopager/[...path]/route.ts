@@ -1,6 +1,8 @@
 import { cookies } from "next/headers";
 import type { NextRequest } from "next/server";
 
+import { readBoundedBody } from "@/lib/bounded-body";
+
 const API_URL = process.env.NOPAGER_API_URL ?? "http://localhost:8080";
 const MAX_BODY_BYTES = 1024 * 1024;
 
@@ -21,20 +23,13 @@ async function proxy(
   const session = cookieStore.get("nopager_session");
   if (session) headers.set("cookie", `nopager_session=${session.value}`);
 
-  let body: ArrayBuffer | undefined;
+  let body: Uint8Array | undefined;
   if (request.method !== "GET") {
-    const declaredLength = request.headers.get("content-length");
-    if (
-      declaredLength &&
-      Number.isFinite(Number(declaredLength)) &&
-      Number(declaredLength) > MAX_BODY_BYTES
-    ) {
+    const boundedBody = await readBoundedBody(request, MAX_BODY_BYTES);
+    if (!boundedBody) {
       return Response.json({ error: "payload_too_large" }, { status: 413 });
     }
-    body = await request.arrayBuffer();
-    if (body.byteLength > MAX_BODY_BYTES) {
-      return Response.json({ error: "payload_too_large" }, { status: 413 });
-    }
+    body = boundedBody;
   }
 
   let upstream: Response;
