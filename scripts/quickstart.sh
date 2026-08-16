@@ -1,0 +1,64 @@
+#!/usr/bin/env sh
+set -eu
+
+fail() {
+  printf 'NoPager quickstart: %s\n' "$1" >&2
+  exit 1
+}
+
+command -v docker >/dev/null 2>&1 || fail "Docker is required."
+docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is required."
+docker info >/dev/null 2>&1 || fail "Docker daemon is not reachable."
+
+if [ ! -f .env ]; then
+  cp .env.example .env
+  printf 'Created .env from .env.example\n'
+fi
+
+set_env() {
+  key=$1
+  value=$2
+  tmp=".env.nopager.$$"
+  awk -v key="$key" -v value="$value" '
+    BEGIN { found = 0 }
+    $0 ~ ("^" key "=") { print key "=" value; found = 1; next }
+    { print }
+    END { if (!found) print key "=" value }
+  ' .env > "$tmp"
+  mv "$tmp" .env
+}
+
+current_master_key=$(awk -F= '$1 == "NOPAGER_MASTER_KEY" { sub(/^[^=]*=/, ""); print; exit }' .env)
+if [ -z "$current_master_key" ]; then
+  if command -v openssl >/dev/null 2>&1; then
+    master_key=$(openssl rand -base64 32 | tr -d '\n')
+  elif command -v python3 >/dev/null 2>&1; then
+    master_key=$(python3 -c 'import base64, os; print(base64.b64encode(os.urandom(32)).decode())')
+  else
+    fail "OpenSSL or Python 3 is required once to generate NOPAGER_MASTER_KEY."
+  fi
+  set_env NOPAGER_MASTER_KEY "$master_key"
+  printf 'Generated NOPAGER_MASTER_KEY\n'
+fi
+
+docker_gid=$(docker run --rm -v /var/run/docker.sock:/sock alpine:3.22 stat -c '%g' /sock 2>/dev/null || true)
+if [ -n "$docker_gid" ]; then
+  set_env DOCKER_GID "$docker_gid"
+  printf 'Detected Docker socket group: %s\n' "$docker_gid"
+else
+  printf 'Warning: could not detect Docker socket group; keeping DOCKER_GID from .env.\n' >&2
+fi
+
+printf 'Building and starting NoPager...\n'
+docker compose up -d --build
+
+web_port=$(awk -F= '$1 == "NOPAGER_WEB_PORT" { print $2; exit }' .env)
+web_port=${web_port:-3000}
+api_port=$(awk -F= '$1 == "NOPAGER_API_PORT" { print $2; exit }' .env)
+api_port=${api_port:-8080}
+
+printf '\nNoPager is starting.\n'
+printf 'Console: http://localhost:%s/setup\n' "$web_port"
+printf 'Local API health: http://127.0.0.1:%s/healthz\n' "$api_port"
+printf '\nNext: open the console and complete GitHub, Vercel, AI provider, and health-check setup.\n'
+printf 'Logs: docker compose logs -f server worker web\n'
