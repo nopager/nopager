@@ -7,9 +7,37 @@ fail() {
   exit 1
 }
 
+cleanup_tmp() {
+  rm -f ".env.nopager.$$"
+}
+trap cleanup_tmp EXIT HUP INT TERM
+
 command -v docker >/dev/null 2>&1 || fail "Docker is required."
 docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is required."
 docker info >/dev/null 2>&1 || fail "Docker daemon is not reachable."
+
+docker_server_version=$(docker version --format '{{.Server.Version}}' 2>/dev/null || true)
+[ -n "$docker_server_version" ] || fail "Docker Engine version could not be detected."
+docker_server_major=${docker_server_version%%.*}
+case "$docker_server_major" in
+  ''|*[!0-9]*) fail "Docker Engine returned an unsupported version string: $docker_server_version" ;;
+esac
+[ "$docker_server_major" -ge 26 ] || fail "Docker Engine 26+ is required for repair-workspace volume subpath isolation (found $docker_server_version)."
+printf 'Docker Engine %s detected.\n' "$docker_server_version"
+
+if command -v curl >/dev/null 2>&1; then
+  http_get() {
+    curl --fail --show-error --silent "$1" >/dev/null 2>&1
+  }
+elif command -v wget >/dev/null 2>&1; then
+  http_get() {
+    wget --quiet --output-document=/dev/null "$1" >/dev/null 2>&1
+  }
+else
+  fail "curl or wget is required so quickstart can verify API and console readiness."
+fi
+
+[ -f .env.example ] || fail ".env.example is missing; run quickstart from the NoPager repository root."
 
 if [ ! -f .env ]; then
   cp .env.example .env
@@ -98,29 +126,31 @@ web_port=${web_port:-3000}
 api_port=$(read_env NOPAGER_API_PORT)
 api_port=${api_port:-8080}
 
-printf 'Building and starting NoPager...\n'
-docker compose up -d --build
+docker compose config --quiet || fail "Docker Compose configuration is invalid."
 
-if command -v curl >/dev/null 2>&1; then
-  printf 'Waiting for API and web console readiness...\n'
-  ready=0
-  attempt=1
-  while [ "$attempt" -le 60 ]; do
-    if curl --fail --silent "http://127.0.0.1:${api_port}/healthz" >/dev/null 2>&1 \
-      && curl --fail --silent "http://127.0.0.1:${web_port}/api/nopager/setup/status" >/dev/null 2>&1; then
-      ready=1
-      break
-    fi
-    sleep 2
-    attempt=$((attempt + 1))
-  done
-  if [ "$ready" -ne 1 ]; then
-    docker compose ps >&2 || true
-    docker compose logs --no-color --tail=200 server worker web >&2 || true
-    fail "services did not become ready within 120 seconds."
+printf 'Building and starting NoPager...\n'
+if ! docker compose up -d --build; then
+  docker compose ps >&2 || true
+  docker compose logs --no-color --tail=200 server worker web postgres >&2 || true
+  fail "Docker Compose failed to start NoPager."
+fi
+
+printf 'Waiting for API and web console readiness...\n'
+ready=0
+attempt=1
+while [ "$attempt" -le 60 ]; do
+  if http_get "http://127.0.0.1:${api_port}/healthz" \
+    && http_get "http://127.0.0.1:${web_port}/api/nopager/setup/status"; then
+    ready=1
+    break
   fi
-else
-  printf 'Warning: curl is not installed, so endpoint readiness was not verified.\n' >&2
+  sleep 2
+  attempt=$((attempt + 1))
+done
+if [ "$ready" -ne 1 ]; then
+  docker compose ps >&2 || true
+  docker compose logs --no-color --tail=200 server worker web postgres >&2 || true
+  fail "services did not become ready within 120 seconds."
 fi
 
 printf '\nNoPager is ready.\n'

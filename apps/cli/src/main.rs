@@ -12,6 +12,8 @@ use rand::RngCore;
 use reqwest::StatusCode;
 use serde_json::Value;
 
+const MIN_DOCKER_ENGINE_MAJOR: u64 = 26;
+
 #[derive(Parser)]
 #[command(name = "nopager", version, about = "NoPager self-hosting CLI")]
 struct Cli {
@@ -177,6 +179,22 @@ async fn doctor() -> anyhow::Result<()> {
         }
     }
 
+    match docker_server_version() {
+        Some(version) if docker_engine_supported(&version) => {
+            println!("✓ Docker Engine {version} supports repair workspace isolation")
+        }
+        Some(version) => {
+            healthy = false;
+            eprintln!(
+                "✗ Docker Engine {version} is too old; NoPager requires {MIN_DOCKER_ENGINE_MAJOR}+"
+            );
+        }
+        None => {
+            healthy = false;
+            eprintln!("✗ Docker Engine server version could not be detected");
+        }
+    }
+
     for variable in [
         "POSTGRES_PASSWORD",
         "NOPAGER_MASTER_KEY",
@@ -195,6 +213,13 @@ async fn doctor() -> anyhow::Result<()> {
     } else {
         healthy = false;
         eprintln!("✗ .env is missing or readable by other local users");
+    }
+
+    if command_success("docker", &["compose", "config", "--quiet"]) {
+        println!("✓ Docker Compose configuration is valid");
+    } else {
+        healthy = false;
+        eprintln!("✗ Docker Compose configuration is invalid");
     }
 
     match client().get(api_url("readyz")?).send().await {
@@ -223,6 +248,27 @@ fn command_success(program: &str, args: &[&str]) -> bool {
         .args(args)
         .output()
         .is_ok_and(|output| output.status.success())
+}
+
+fn docker_server_version() -> Option<String> {
+    let output = ProcessCommand::new("docker")
+        .args(["version", "--format", "{{.Server.Version}}"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn docker_engine_supported(version: &str) -> bool {
+    version
+        .split('.')
+        .next()
+        .and_then(|major| major.parse::<u64>().ok())
+        .is_some_and(|major| major >= MIN_DOCKER_ENGINE_MAJOR)
 }
 
 async fn print_get(path: &str) -> anyhow::Result<()> {
@@ -379,5 +425,13 @@ mod tests {
             ensure_trailing_slash("http://localhost:8080/"),
             "http://localhost:8080/"
         );
+    }
+
+    #[test]
+    fn docker_engine_gate_matches_volume_subpath_requirement() {
+        assert!(!docker_engine_supported("25.0.5"));
+        assert!(docker_engine_supported("26.0.0"));
+        assert!(docker_engine_supported("28.3.3"));
+        assert!(!docker_engine_supported("desktop"));
     }
 }

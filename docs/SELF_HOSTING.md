@@ -2,6 +2,19 @@
 
 This guide is for the single-admin, single-app Design Partner Alpha. NoPager's default Docker Compose topology keeps the Rust API private on loopback and exposes the web console on loopback unless you deliberately change `NOPAGER_WEB_BIND`.
 
+## Host prerequisites
+
+The self-hosted Alpha requires:
+
+- Docker Engine 26 or newer. NoPager's repair sandbox uses Docker's volume-subpath mount support, which was added in Engine 26;
+- Docker Compose v2;
+- a reachable Docker daemon and permission to use its socket;
+- `curl` or `wget` so quickstart can prove the API and console are actually ready before reporting success;
+- OpenSSL or Python 3 on first boot if NoPager needs to generate local secrets;
+- local ports 3000 and 8080 available unless you override `NOPAGER_WEB_PORT` and `NOPAGER_API_PORT`.
+
+`scripts/quickstart.sh` checks these prerequisites before building the stack and fails with a concrete error instead of leaving a partially verified installation.
+
 ## First boot
 
 ```bash
@@ -18,7 +31,7 @@ Quickstart creates `.env` if needed and generates three local secrets:
 
 It uses a private process umask and forces `.env` to mode `0600` on Unix so generated credentials are not readable by other local users. `nopager init` applies the same private-file rule.
 
-It then detects the Docker socket group, starts the stack, and waits for both the API and web console to become ready.
+It then detects the Docker socket group, validates the rendered Compose configuration, starts the stack, and waits for both the API and web console to become ready.
 
 Open `http://localhost:3000/setup` and complete the GitHub, Vercel, AI-provider, health-check, and safety-mode checks.
 
@@ -95,7 +108,7 @@ cargo run -p nopager-cli -- doctor
 cargo run -p nopager-cli -- status
 ```
 
-`doctor` also verifies that `.env` is private on Unix.
+`doctor` verifies the Docker Engine compatibility gate, rendered Compose configuration, required secrets, private `.env` permissions on Unix, and live API/PostgreSQL readiness.
 
 ## Day-to-day operator commands
 
