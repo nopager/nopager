@@ -6,16 +6,19 @@ export type InternalIncidentState =
   | "REPAIRING"
   | "TESTING"
   | "PREVIEW_DEPLOYING"
-  | "PREVIEW_VERIFYING"
+  | "VERIFYING_PREVIEW"
   | "WAITING_APPROVAL"
   | "PRODUCTION_DEPLOYING"
-  | "PRODUCTION_VERIFYING"
-  | "WATCHING"
+  | "VERIFYING_PRODUCTION"
   | "ROLLING_BACK"
+  | "ROLLED_BACK"
   | "RESOLVED"
   | "FAILED"
   | "ESCALATED"
-  | "CANCELLED";
+  | "CANCELLED"
+  | "IGNORED"
+  | "DUPLICATE"
+  | "PAUSED";
 
 export type UiIncidentState =
   | "OPEN"
@@ -23,7 +26,8 @@ export type UiIncidentState =
   | "REPAIRING"
   | "WAITING_APPROVAL"
   | "RESOLVED"
-  | "HUMAN_NEEDED";
+  | "HUMAN_NEEDED"
+  | "PAUSED";
 
 export function projectIncidentState(
   state: InternalIncidentState,
@@ -31,7 +35,15 @@ export function projectIncidentState(
   if (state === "OPEN" || state === "COLLECTING_CONTEXT") return "OPEN";
   if (state === "DIAGNOSING" || state === "PLANNING") return "DIAGNOSING";
   if (state === "WAITING_APPROVAL") return "WAITING_APPROVAL";
-  if (state === "RESOLVED" || state === "CANCELLED") return "RESOLVED";
+  if (state === "PAUSED") return "PAUSED";
+  if (
+    state === "RESOLVED" ||
+    state === "ROLLED_BACK" ||
+    state === "CANCELLED" ||
+    state === "IGNORED" ||
+    state === "DUPLICATE"
+  )
+    return "RESOLVED";
   if (state === "FAILED" || state === "ESCALATED") return "HUMAN_NEEDED";
   return "REPAIRING";
 }
