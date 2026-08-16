@@ -133,7 +133,9 @@ async fn doctor() -> anyhow::Result<()> {
     }
 
     match client().get(api_url("readyz")?).send().await {
-        Ok(response) if response.status().is_success() => println!("✓ NoPager API and PostgreSQL ready"),
+        Ok(response) if response.status().is_success() => {
+            println!("✓ NoPager API and PostgreSQL ready")
+        }
         Ok(response) => {
             healthy = false;
             eprintln!("✗ NoPager readiness returned {}", response.status());
@@ -201,7 +203,11 @@ fn client() -> reqwest::Client {
 fn admin_token() -> anyhow::Result<String> {
     env_value("NOPAGER_ADMIN_TOKEN")
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("NOPAGER_ADMIN_TOKEN is required; run scripts/quickstart.sh or `nopager init`"))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "NOPAGER_ADMIN_TOKEN is required; run scripts/quickstart.sh or `nopager init`"
+            )
+        })
 }
 
 fn api_url(path: &str) -> anyhow::Result<String> {
@@ -283,7 +289,13 @@ mod tests {
 
     #[test]
     fn api_url_handles_missing_trailing_slash() {
-        assert_eq!(ensure_trailing_slash("http://localhost:8080"), "http://localhost:8080/");
-        assert_eq!(ensure_trailing_slash("http://localhost:8080/"), "http://localhost:8080/");
+        assert_eq!(
+            ensure_trailing_slash("http://localhost:8080"),
+            "http://localhost:8080/"
+        );
+        assert_eq!(
+            ensure_trailing_slash("http://localhost:8080/"),
+            "http://localhost:8080/"
+        );
     }
 }
