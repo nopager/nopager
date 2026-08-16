@@ -355,20 +355,14 @@ async fn test_vercel_connection(
         }
     };
     match client.list_deployments(&project.id, 10).await {
-        Ok(deployments)
-            if deployments
-                .iter()
-                .any(|deployment| deployment.target.as_deref() == Some("production")) =>
-        {
-            (
-                StatusCode::OK,
-                Json(json!({
-                    "connected": true,
-                    "project": { "id": project.id, "name": project.name },
-                    "productionDeploymentFound": true
-                })),
-            )
-        }
+        Ok(deployments) if deployments.iter().any(vercel_production_is_ready) => (
+            StatusCode::OK,
+            Json(json!({
+                "connected": true,
+                "project": { "id": project.id, "name": project.name },
+                "productionDeploymentFound": true
+            })),
+        ),
         Ok(_) => api_error(
             StatusCode::UNPROCESSABLE_ENTITY,
             "vercel_production_deployment_not_found",
@@ -552,10 +546,7 @@ async fn protect_app(
                 .into_response();
         }
     };
-    let Some(initial_deployment) = deployments
-        .into_iter()
-        .find(|deployment| deployment.target.as_deref() == Some("production"))
-    else {
+    let Some(initial_deployment) = deployments.into_iter().find(vercel_production_is_ready) else {
         return api_error(
             StatusCode::UNPROCESSABLE_ENTITY,
             "vercel_production_deployment_not_found",
@@ -694,6 +685,17 @@ fn normalize_pem(value: &str) -> String {
         "\\n", "
 ",
     )
+}
+
+fn vercel_production_is_ready(deployment: &nopager_connectors::vercel::Deployment) -> bool {
+    deployment.target.as_deref() == Some("production")
+        && matches!(
+            deployment
+                .ready_state
+                .as_deref()
+                .or(deployment.state.as_deref()),
+            Some("READY")
+        )
 }
 
 fn optional_nonempty(value: &str) -> Option<String> {
