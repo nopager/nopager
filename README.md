@@ -43,6 +43,8 @@ Safe Mode is the default. NoPager may diagnose, repair, build, test, open a PR, 
 
 Autopilot is experimental and only permits low-risk, verified, reversible promotion. A missing or failed Preview verification is a hard production block, not something that human approval can bypass. High-risk changes—including dependency manifests, database schema, IAM, DNS, billing, and secrets—are escalated. The Kill Switch pauses mutations while retaining read-only monitoring and evidence collection; resuming protection restarts paused incidents from fresh context instead of continuing stale mutation state.
 
+If production verification fails after a repair promotion, NoPager explicitly restores the previously recorded READY known-good Vercel deployment. It does not infer current traffic from Vercel's `target=production` field.
+
 Repair execution uses a non-root, resource-limited, capability-dropped Docker container with a read-only root filesystem. Network access is disabled for build and test and is enabled only for recognized dependency-fetch commands. The trusted worker needs access to the Docker daemon; repair containers never receive the daemon socket or service credentials.
 
 ## Incident lifecycle
