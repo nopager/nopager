@@ -1,9 +1,14 @@
+use std::time::Duration;
+
 use reqwest::{Client, Method, RequestBuilder};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::{ConnectorError, decode, expect_success};
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 pub struct VercelClient {
@@ -60,8 +65,13 @@ impl VercelClient {
                 "Vercel token is empty".into(),
             ));
         }
+        let http = Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
+            .user_agent(concat!("NoPager/", env!("CARGO_PKG_VERSION")))
+            .build()?;
         Ok(Self {
-            http: Client::new(),
+            http,
             token,
             team_id: team_id.filter(|value| !value.trim().is_empty()),
             api_base: Url::parse("https://api.vercel.com/").expect("constant URL"),
