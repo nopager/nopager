@@ -71,6 +71,21 @@ jobs:
           test -n "$password"
           test "$password" != "nopager"
           docker compose config --quiet
+      - name: Verify Docker network isolation
+        run: |
+          docker compose exec -T web node - <<'NODE'
+          const net = require('node:net');
+          let finished = false;
+          const finish = (code) => {
+            if (finished) return;
+            finished = true;
+            process.exit(code);
+          };
+          const socket = net.connect({ host: 'postgres', port: 5432 });
+          socket.on('connect', () => finish(1));
+          socket.on('error', () => finish(0));
+          setTimeout(() => finish(0), 3000);
+          NODE
       - name: Verify Rust setup API
         run: curl --fail --show-error --silent http://127.0.0.1:8080/api/v1/setup/status >/dev/null
       - name: Verify web console and API proxy
