@@ -13,6 +13,8 @@ services:
       retries: 10
     volumes:
       - nopager-postgres:/var/lib/postgresql/data
+    networks:
+      - backend
 
   server:
     build:
@@ -38,10 +40,14 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    networks:
+      - frontend
+      - backend
 
   workspaces-init:
     image: alpine:3.22
     command: ["sh", "-c", "chown -R 10001:10001 /workspaces"]
+    network_mode: none
     volumes:
       - nopager-workspaces:/workspaces
 
@@ -85,6 +91,8 @@ services:
         condition: service_healthy
       workspaces-init:
         condition: service_completed_successfully
+    networks:
+      - backend
 
   web:
     build:
@@ -102,6 +110,12 @@ services:
       - "${NOPAGER_WEB_BIND:-127.0.0.1}:${NOPAGER_WEB_PORT:-3000}:3000"
     depends_on:
       - server
+    networks:
+      - frontend
+
+networks:
+  frontend:
+  backend:
 
 volumes:
   nopager-postgres:
