@@ -81,7 +81,13 @@ impl GitHubAppAuth {
             .map_err(|error| ConnectorError::InvalidConfiguration(error.to_string()))?;
         let response = github_headers(Client::new().post(endpoint))
             .bearer_auth(self.jwt_at(now)?)
-            .json(&serde_json::json!({ "repositories": [repository] }))
+            .json(&serde_json::json!({
+                "repositories": [repository],
+                "permissions": {
+                    "contents": "write",
+                    "pull_requests": "write"
+                }
+            }))
             .send()
             .await?;
         let token: InstallationTokenResponse = decode(response).await?;
@@ -101,6 +107,13 @@ pub struct CommitDetails {
     pub sha: String,
     pub message: String,
     pub changed_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RepositoryDetails {
+    pub id: u64,
+    pub full_name: String,
+    pub default_branch: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -184,6 +197,17 @@ struct TreeEntry {
 }
 
 impl GitHubClient {
+    pub async fn get_repository(
+        &self,
+        owner: &str,
+        repository: &str,
+    ) -> Result<RepositoryDetails, ConnectorError> {
+        validate_segment(owner, "owner")?;
+        validate_segment(repository, "repository")?;
+        let path = format!("repos/{owner}/{repository}");
+        decode(self.request(reqwest::Method::GET, &path)?.send().await?).await
+    }
+
     pub async fn get_commit(
         &self,
         owner: &str,
