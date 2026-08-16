@@ -57,8 +57,17 @@ generate_uri_secret() {
 
 current_postgres_password=$(read_env POSTGRES_PASSWORD)
 if [ -z "$current_postgres_password" ]; then
-  set_env POSTGRES_PASSWORD "$(generate_uri_secret)"
-  printf 'Generated POSTGRES_PASSWORD\n'
+  legacy_database_url=$(read_env DATABASE_URL)
+  case "$legacy_database_url" in
+    postgresql://nopager:nopager@postgres:*)
+      set_env POSTGRES_PASSWORD nopager
+      printf 'Preserved legacy Alpha PostgreSQL password for the existing Docker volume.\n' >&2
+      ;;
+    *)
+      set_env POSTGRES_PASSWORD "$(generate_uri_secret)"
+      printf 'Generated POSTGRES_PASSWORD\n'
+      ;;
+  esac
 fi
 
 current_master_key=$(read_env NOPAGER_MASTER_KEY)
