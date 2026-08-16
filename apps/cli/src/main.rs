@@ -1,6 +1,9 @@
 use std::{fs, process::Command as ProcessCommand};
 
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use clap::{Parser, Subcommand};
 use rand::RngCore;
 use reqwest::StatusCode;
@@ -49,22 +52,33 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn init() -> anyhow::Result<()> {
+    let mut postgres = [0_u8; 32];
     let mut master = [0_u8; 32];
     let mut admin = [0_u8; 32];
+    rand::rng().fill_bytes(&mut postgres);
     rand::rng().fill_bytes(&mut master);
     rand::rng().fill_bytes(&mut admin);
     let existing = match fs::read_to_string(".env") {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            "DATABASE_URL=postgresql://nopager:nopager@localhost:5432/nopager\nNOPAGER_API_URL=http://localhost:8080/\n".into()
+            "NOPAGER_API_URL=http://localhost:8080/\n".into()
         }
         Err(error) => return Err(error.into()),
     };
+    let (contents, postgres_changed) = fill_blank_env(
+        existing,
+        "POSTGRES_PASSWORD",
+        &URL_SAFE_NO_PAD.encode(postgres),
+    );
     let (contents, master_changed) =
-        fill_blank_env(existing, "NOPAGER_MASTER_KEY", &STANDARD.encode(master));
+        fill_blank_env(contents, "NOPAGER_MASTER_KEY", &STANDARD.encode(master));
     let (contents, admin_changed) =
         fill_blank_env(contents, "NOPAGER_ADMIN_TOKEN", &STANDARD.encode(admin));
-    if master_changed || admin_changed || !std::path::Path::new(".env").exists() {
+    if postgres_changed
+        || master_changed
+        || admin_changed
+        || !std::path::Path::new(".env").exists()
+    {
         fs::write(".env", contents)?;
         println!("Created or completed .env with fresh local secrets.");
     } else {
@@ -123,7 +137,11 @@ async fn doctor() -> anyhow::Result<()> {
         }
     }
 
-    for variable in ["DATABASE_URL", "NOPAGER_MASTER_KEY", "NOPAGER_ADMIN_TOKEN"] {
+    for variable in [
+        "POSTGRES_PASSWORD",
+        "NOPAGER_MASTER_KEY",
+        "NOPAGER_ADMIN_TOKEN",
+    ] {
         if env_value(variable).is_some_and(|value| !value.trim().is_empty()) {
             println!("✓ {variable} is configured");
         } else {
@@ -275,12 +293,16 @@ mod tests {
     #[test]
     fn init_fills_blank_secrets_without_replacing_existing_values() {
         let (contents, changed) = fill_blank_env(
-            "NOPAGER_MASTER_KEY=\nNOPAGER_ADMIN_TOKEN=keep-me\n".into(),
-            "NOPAGER_MASTER_KEY",
-            "generated",
+            "POSTGRES_PASSWORD=\nNOPAGER_MASTER_KEY=\nNOPAGER_ADMIN_TOKEN=keep-me\n".into(),
+            "POSTGRES_PASSWORD",
+            "db-generated",
         );
         assert!(changed);
-        assert!(contents.contains("NOPAGER_MASTER_KEY=generated"));
+        assert!(contents.contains("POSTGRES_PASSWORD=db-generated"));
+        let (contents, changed) =
+            fill_blank_env(contents, "NOPAGER_MASTER_KEY", "master-generated");
+        assert!(changed);
+        assert!(contents.contains("NOPAGER_MASTER_KEY=master-generated"));
         let (contents, changed) = fill_blank_env(contents, "NOPAGER_ADMIN_TOKEN", "replacement");
         assert!(!changed);
         assert!(contents.contains("NOPAGER_ADMIN_TOKEN=keep-me"));
