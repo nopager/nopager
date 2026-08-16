@@ -16,6 +16,8 @@ Quickstart creates `.env` if needed and generates three local secrets:
 - `NOPAGER_MASTER_KEY`: 32-byte standard-base64 encryption key for stored integration credentials;
 - `NOPAGER_ADMIN_TOKEN`: local operator/CLI bearer token.
 
+It uses a private process umask and forces `.env` to mode `0600` on Unix so generated credentials are not readable by other local users. `nopager init` applies the same private-file rule.
+
 It then detects the Docker socket group, starts the stack, and waits for both the API and web console to become ready.
 
 Open `http://localhost:3000/setup` and complete the GitHub, Vercel, AI-provider, health-check, and safety-mode checks.
@@ -36,6 +38,8 @@ private Docker network
    +-- PostgreSQL :5432
    +-- Worker
 ```
+
+The Compose file places Web and PostgreSQL on separate Docker networks. Web can reach Server, Server bridges the frontend/backend networks, and Worker/PostgreSQL stay on the backend network. The one-shot workspace initializer runs with networking disabled.
 
 Keep the Rust API private. The default host mapping for port 8080 is `127.0.0.1`; do not publish it to the Internet. Provider webhooks should target the web origin, which forwards only the required signed request data to the private API.
 
@@ -91,6 +95,8 @@ cargo run -p nopager-cli -- doctor
 cargo run -p nopager-cli -- status
 ```
 
+`doctor` also verifies that `.env` is private on Unix.
+
 ## Day-to-day operator commands
 
 The CLI reads `.env` automatically:
@@ -124,6 +130,8 @@ Do not delete the PostgreSQL volume or replace `NOPAGER_MASTER_KEY` as a trouble
 The worker is trusted and needs Docker daemon access to create isolated repair containers. Repair containers do not receive the Docker socket or provider credentials, run non-root, drop Linux capabilities, use a read-only root filesystem, and receive resource limits. Compromise of the trusted worker or Docker daemon remains a host-level security event; isolate the NoPager host accordingly.
 
 Health checks accept public HTTPS targets only and reject local/private/reserved address resolution to reduce SSRF risk. High-risk repository and infrastructure paths are deterministically blocked from automatic AI repair.
+
+Container logs use bounded `json-file` rotation in the default Compose stack so an unattended install does not grow service logs without limit.
 
 ## Alpha scope
 
