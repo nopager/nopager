@@ -33,6 +33,12 @@ pub struct DeploymentList {
     pub deployments: Vec<Deployment>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProjectDetails {
+    pub id: String,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct GitSource {
     #[serde(rename = "type")]
@@ -53,7 +59,7 @@ impl VercelClient {
         Ok(Self {
             http: Client::new(),
             token,
-            team_id,
+            team_id: team_id.filter(|value| !value.trim().is_empty()),
             api_base: Url::parse("https://api.vercel.com/").expect("constant URL"),
         })
     }
@@ -76,6 +82,16 @@ impl VercelClient {
             request = request.query(&[("teamId", team_id)]);
         }
         Ok(request)
+    }
+
+    pub async fn get_project(&self, id_or_name: &str) -> Result<ProjectDetails, ConnectorError> {
+        validate_id(id_or_name)?;
+        decode(
+            self.request(Method::GET, &format!("v9/projects/{id_or_name}"))?
+                .send()
+                .await?,
+        )
+        .await
     }
 
     pub async fn get_deployment(&self, id_or_url: &str) -> Result<Deployment, ConnectorError> {
@@ -209,7 +225,15 @@ mod tests {
     #[test]
     fn rejects_path_in_identifier() {
         assert!(validate_id("prj_123").is_ok());
+        assert!(validate_id("my-project").is_ok());
         assert!(validate_id("../../projects").is_err());
+    }
+
+    #[test]
+    fn empty_team_scope_is_treated_as_personal_account() {
+        let client = VercelClient::new(SecretString::from("token".to_owned()), Some("   ".into()))
+            .expect("valid client");
+        assert!(client.team_id.is_none());
     }
 
     #[test]
