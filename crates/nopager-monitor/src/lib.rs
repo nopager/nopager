@@ -7,6 +7,9 @@ use ipnet::IpNet;
 use thiserror::Error;
 use url::{Host, Url};
 
+const VERCEL_BYPASS_ENV: &str = "VERCEL_AUTOMATION_BYPASS_SECRET";
+const VERCEL_BYPASS_HEADER: &str = "x-vercel-protection-bypass";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckResult {
     Success,
@@ -225,7 +228,19 @@ pub async fn check_http(
     }
     let client = builder.build()?;
     let started = Instant::now();
-    match client.get(url.clone()).send().await {
+    let mut request = client.get(url.clone());
+    // Vercel preview deployments are frequently protected. Vercel's official
+    // automation bypass is intentionally injected only for *.vercel.app and
+    // only when this process has been given the dedicated secret. In the
+    // default Compose topology that environment variable is worker-only, so
+    // setup/production health checks still prove the configured app is public.
+    if is_vercel_deployment_host(host)
+        && let Ok(secret) = std::env::var(VERCEL_BYPASS_ENV)
+        && !secret.trim().is_empty()
+    {
+        request = request.header(VERCEL_BYPASS_HEADER, secret);
+    }
+    match request.send().await {
         Ok(response) => {
             let status = response.status().as_u16();
             Ok(HttpHealthObservation {
@@ -246,6 +261,12 @@ pub async fn check_http(
             }),
         }),
     }
+}
+
+fn is_vercel_deployment_host(host: &str) -> bool {
+    host.trim_end_matches('.')
+        .to_ascii_lowercase()
+        .ends_with(".vercel.app")
 }
 
 #[derive(Debug, Error)]
@@ -337,5 +358,14 @@ mod tests {
             ]),
             Err(UrlSafetyError::NonPublicTarget)
         );
+    }
+
+    #[test]
+    fn sends_vercel_bypass_only_to_vercel_deployment_hosts() {
+        assert!(is_vercel_deployment_host("demo-git-main-team.vercel.app"));
+        assert!(is_vercel_deployment_host("DEMO.VERCEL.APP."));
+        assert!(!is_vercel_deployment_host("vercel.app"));
+        assert!(!is_vercel_deployment_host("vercel.app.attacker.example"));
+        assert!(!is_vercel_deployment_host("example.com"));
     }
 }
