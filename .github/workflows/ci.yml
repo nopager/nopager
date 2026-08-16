@@ -41,12 +41,11 @@ jobs:
           cp .env.example .env
           python - <<'PY'
           from pathlib import Path
-          import os
 
           path = Path('.env')
           values = {
               'NOPAGER_MASTER_KEY': 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=',
-              'DOCKER_GID': str(os.stat('/var/run/docker.sock').st_gid),
+              'NOPAGER_ADMIN_TOKEN': 'ci-smoke-operator-token',
               'NOPAGER_WEB_BIND': '127.0.0.1',
           }
           lines = path.read_text().splitlines()
@@ -65,45 +64,19 @@ jobs:
           path.write_text('\n'.join(rendered) + '\n')
           PY
       - run: docker compose config --quiet
-      - run: docker compose build server worker web
-      - name: Start self-hosted stack
-        run: docker compose up -d
-      - name: Wait for Rust API health
-        run: |
-          for attempt in $(seq 1 60); do
-            if curl --fail --silent http://127.0.0.1:8080/healthz >/dev/null; then
-              exit 0
-            fi
-            sleep 2
-          done
-          docker compose ps --all
-          docker compose logs --no-color server postgres
-          exit 1
+      - name: Run user-facing quickstart
+        run: sh scripts/quickstart.sh
       - name: Verify Rust setup API
+        run: curl --fail --show-error --silent http://127.0.0.1:8080/api/v1/setup/status >/dev/null
+      - name: Verify web console and API proxy
         run: |
-          curl --fail --show-error --silent http://127.0.0.1:8080/api/v1/setup/status >/dev/null || {
-            docker compose ps --all
-            docker compose logs --no-color server postgres
-            exit 1
-          }
-      - name: Wait for web console
+          curl --fail --show-error --silent http://127.0.0.1:3000/setup >/dev/null
+          curl --fail --show-error --silent http://127.0.0.1:3000/api/nopager/setup/status >/dev/null
+      - name: Verify operator bearer token
         run: |
-          for attempt in $(seq 1 60); do
-            if curl --fail --silent http://127.0.0.1:3000/setup >/dev/null; then
-              exit 0
-            fi
-            sleep 2
-          done
-          docker compose ps --all
-          docker compose logs --no-color web server
-          exit 1
-      - name: Verify web API proxy
-        run: |
-          curl --fail --show-error --silent http://127.0.0.1:3000/api/nopager/setup/status >/dev/null || {
-            docker compose ps --all
-            docker compose logs --no-color web server
-            exit 1
-          }
+          curl --fail --show-error --silent \
+            -H 'authorization: Bearer ci-smoke-operator-token' \
+            http://127.0.0.1:8080/api/v1/incidents >/dev/null
       - name: Exercise first-admin bootstrap through web origin
         run: |
           rm -f /tmp/nopager.cookies /tmp/nopager.headers /tmp/nopager-status.json
