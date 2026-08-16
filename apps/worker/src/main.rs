@@ -42,6 +42,9 @@ async fn main() -> anyhow::Result<()> {
                 if let Err(error) = database.enqueue_due_health_checks(100).await {
                     error!(%error, "failed to schedule health checks");
                 }
+        if let Err(error) = database.enqueue_due_vercel_polls(100).await {
+            error!(%error, "failed to schedule Vercel polling fallback");
+        }
             }
             () = tokio::time::sleep(Duration::from_millis(750)) => {
                 if let Some(job) = database.claim_next(&worker_id).await? {
@@ -1511,26 +1514,28 @@ async fn process_vercel_poll(database: &Database, payload: &Value) -> anyhow::Re
             .ready_state
             .as_deref()
             .or(deployment.state.as_deref())
-            .unwrap_or("UNKNOWN");
+            .unwrap_or("UNKNOWN")
+            .to_owned();
         let url = https_url(&deployment.url);
         let sha = deployment
             .meta
             .get("githubCommitSha")
             .and_then(Value::as_str)
-            .unwrap_or("unknown");
+            .unwrap_or("unknown")
+            .to_owned();
         database
             .save_deployment(
                 project_id,
                 &deployment.id,
                 "production",
-                sha,
+                &sha,
                 &url,
-                state,
+                &state,
                 false,
             )
             .await?;
 
-        if matches!(state, "ERROR" | "CANCELED" | "CANCELLED") {
+        if matches!(state.as_str(), "ERROR" | "CANCELED" | "CANCELLED") {
             database
                 .open_incident(&IncidentTrigger {
                     project_id,
