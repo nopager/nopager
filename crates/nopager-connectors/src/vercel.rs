@@ -230,6 +230,8 @@ mod tests {
             id: "dpl_123".into(),
             url: "example.vercel.app".into(),
             ready_state: Some("READY".into()),
+            state: None,
+            created: None,
             target: target.map(ToOwned::to_owned),
             live,
             meta: serde_json::Value::Null,
