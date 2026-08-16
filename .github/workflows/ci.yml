@@ -65,11 +65,12 @@ jobs:
           PY
       - name: Run user-facing quickstart
         run: sh scripts/quickstart.sh
-      - name: Verify generated self-host database credential
+      - name: Verify generated self-host secrets
         run: |
           password=$(awk -F= '$1 == "POSTGRES_PASSWORD" { sub(/^[^=]*=/, ""); print; exit }' .env)
           test -n "$password"
           test "$password" != "nopager"
+          test "$(stat -c '%a' .env)" = "600"
           docker compose config --quiet
       - name: Verify Docker network isolation
         run: |
