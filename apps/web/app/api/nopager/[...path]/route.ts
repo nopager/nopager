@@ -2,6 +2,7 @@ import { cookies } from "next/headers";
 import type { NextRequest } from "next/server";
 
 const API_URL = process.env.NOPAGER_API_URL ?? "http://localhost:8080";
+const MAX_BODY_BYTES = 1024 * 1024;
 
 async function proxy(
   request: NextRequest,
@@ -20,12 +21,28 @@ async function proxy(
   const session = cookieStore.get("nopager_session");
   if (session) headers.set("cookie", `nopager_session=${session.value}`);
 
+  let body: ArrayBuffer | undefined;
+  if (request.method !== "GET") {
+    const declaredLength = request.headers.get("content-length");
+    if (
+      declaredLength &&
+      Number.isFinite(Number(declaredLength)) &&
+      Number(declaredLength) > MAX_BODY_BYTES
+    ) {
+      return Response.json({ error: "payload_too_large" }, { status: 413 });
+    }
+    body = await request.arrayBuffer();
+    if (body.byteLength > MAX_BODY_BYTES) {
+      return Response.json({ error: "payload_too_large" }, { status: 413 });
+    }
+  }
+
   let upstream: Response;
   try {
     upstream = await fetch(target, {
       method: request.method,
       headers,
-      body: request.method === "GET" ? undefined : await request.arrayBuffer(),
+      body,
       cache: "no-store",
     });
   } catch {
