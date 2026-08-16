@@ -34,7 +34,7 @@ Do not point Vercel at the internal Rust API port. The public Next.js route forw
 
 ## Production deployment requirement
 
-During setup, NoPager verifies that the selected project is accessible and has a production deployment. That deployment becomes the initial known-good rollback point. If setup reports `vercel_production_deployment_not_found`, create a healthy production deployment first and retry.
+During setup, NoPager verifies that the selected project is accessible and has a **READY production deployment**. The newest READY production deployment in the returned deployment history becomes the initial known-good rollback point; failed or canceled production attempts are never accepted as that baseline. If setup reports `vercel_production_deployment_not_found`, create a healthy production deployment first and retry.
 
 ## Health URL
 
@@ -44,5 +44,5 @@ The production health check is configured separately from the Vercel generated d
 
 - `vercel_project_not_accessible`: verify the token, Team ID scope, and project ID/name.
 - `vercel_connection_failed`: verify token validity and account/team access.
-- `vercel_production_deployment_not_found`: deploy the project to Production once, then retry setup.
+- `vercel_production_deployment_not_found`: deploy the project to Production and wait until it is READY, then retry setup.
 - Polling errors: inspect `docker compose logs -f worker` and confirm the access token still has access to the project.
