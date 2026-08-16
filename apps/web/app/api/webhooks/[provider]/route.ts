@@ -3,7 +3,12 @@ import type { NextRequest } from "next/server";
 const API_URL = process.env.NOPAGER_API_URL ?? "http://localhost:8080";
 
 const forwardedHeaders: Record<string, readonly string[]> = {
-  github: ["content-type", "x-github-delivery", "x-github-event", "x-hub-signature-256"],
+  github: [
+    "content-type",
+    "x-github-delivery",
+    "x-github-event",
+    "x-hub-signature-256",
+  ],
   vercel: ["content-type", "x-vercel-signature"],
 };
 
@@ -17,7 +22,10 @@ export async function POST(
   const { provider } = await context.params;
   const allowed = forwardedHeaders[provider];
   if (!allowed) {
-    return Response.json({ error: "unsupported_webhook_provider" }, { status: 404 });
+    return Response.json(
+      { error: "unsupported_webhook_provider" },
+      { status: 404 },
+    );
   }
 
   const headers = new Headers();
