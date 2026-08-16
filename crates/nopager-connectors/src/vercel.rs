@@ -21,6 +21,10 @@ pub struct Deployment {
     #[serde(default)]
     pub ready_state: Option<String>,
     #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub created: Option<i64>,
+    #[serde(default)]
     pub target: Option<String>,
     #[serde(default)]
     pub live: Option<bool>,
@@ -110,15 +114,25 @@ impl VercelClient {
         project_id: &str,
         limit: u8,
     ) -> Result<Vec<Deployment>, ConnectorError> {
+        self.list_deployments_since(project_id, limit, None).await
+    }
+
+    pub async fn list_deployments_since(
+        &self,
+        project_id: &str,
+        limit: u8,
+        since_ms: Option<i64>,
+    ) -> Result<Vec<Deployment>, ConnectorError> {
         validate_id(project_id)?;
-        let response = self
+        let limit = limit.min(100).to_string();
+        let mut request = self
             .request(Method::GET, "v6/deployments")?
-            .query(&[
-                ("projectId", project_id),
-                ("limit", &limit.min(100).to_string()),
-            ])
-            .send()
-            .await?;
+            .query(&[("projectId", project_id), ("limit", limit.as_str())]);
+        if let Some(since_ms) = since_ms {
+            let since = since_ms.to_string();
+            request = request.query(&[("since", since.as_str())]);
+        }
+        let response = request.send().await?;
         Ok(decode::<DeploymentList>(response).await?.deployments)
     }
 

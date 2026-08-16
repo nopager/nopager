@@ -58,6 +58,7 @@ struct ProtectAppRequest {
     vercel_team_id: String,
     vercel_project_id: String,
     vercel_token: String,
+    #[serde(default)]
     vercel_webhook_secret: String,
     provider: String,
     provider_api_key: String,
@@ -695,7 +696,6 @@ fn valid_setup(request: &ProtectAppRequest) -> bool {
         && request.github_webhook_secret.len() >= 16
         && !request.vercel_project_id.trim().is_empty()
         && !request.vercel_token.trim().is_empty()
-        && request.vercel_webhook_secret.len() >= 16
         && matches!(request.provider.as_str(), "openai" | "anthropic" | "gemini")
         && !request.provider_api_key.trim().is_empty()
         && !request.provider_model.trim().is_empty()
