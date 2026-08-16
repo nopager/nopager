@@ -163,7 +163,7 @@ export function SafetyControls({
               disabled={paused || busy}
               onClick={() => changePaused(true)}
             >
-              {paused ? "Protection is paused" : busy ? "Working…" : "Pause all actions"}
+              {killSwitchLabel(paused, busy)}
             </button>
             <small>This action is recorded in the audit log.</small>
           </Card>
@@ -171,4 +171,10 @@ export function SafetyControls({
       </div>
     </>
   );
+}
+
+function killSwitchLabel(paused: boolean, busy: boolean) {
+  if (paused) return "Protection is paused";
+  if (busy) return "Working…";
+  return "Pause all actions";
 }
