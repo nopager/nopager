@@ -70,8 +70,13 @@ jobs:
         run: curl --fail --show-error --silent http://127.0.0.1:8080/api/v1/setup/status >/dev/null
       - name: Verify web console and API proxy
         run: |
+          rm -f /tmp/nopager-proxy.headers
           curl --fail --show-error --silent http://127.0.0.1:3000/setup >/dev/null
-          curl --fail --show-error --silent http://127.0.0.1:3000/api/nopager/setup/status >/dev/null
+          curl --fail --show-error --silent \
+            -D /tmp/nopager-proxy.headers \
+            http://127.0.0.1:3000/api/nopager/setup/status >/dev/null
+          grep -qi '^cache-control:.*private.*no-store' /tmp/nopager-proxy.headers
+          grep -qi '^pragma:.*no-cache' /tmp/nopager-proxy.headers
       - name: Verify operator bearer token
         run: |
           curl --fail --show-error --silent \
@@ -100,6 +105,7 @@ jobs:
             http://127.0.0.1:3000/api/nopager/setup/admin >/dev/null
           grep -qi 'httponly' /tmp/nopager.headers
           grep -qi 'samesite=strict' /tmp/nopager.headers
+          grep -qi '^cache-control:.*private.*no-store' /tmp/nopager.headers
           curl --fail --show-error --silent \
             -b /tmp/nopager.cookies \
             http://127.0.0.1:3000/api/nopager/setup/status \
