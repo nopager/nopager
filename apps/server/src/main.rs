@@ -1057,7 +1057,7 @@ async fn webhook_secret(state: &ServerState, kind: &str) -> Option<Vec<u8>> {
         _ => return None,
     };
     if let Some(secret) = configured {
-        return Some(secret.to_vec());
+        return (!secret.is_empty()).then(|| secret.to_vec());
     }
     let database = state.database.as_ref()?;
     let cipher = state.secret_cipher.as_ref()?;
@@ -1067,6 +1067,7 @@ async fn webhook_secret(state: &ServerState, kind: &str) -> Option<Vec<u8>> {
     credentials
         .get("webhookSecret")
         .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
         .map(|value| value.as_bytes().to_vec())
 }
 
