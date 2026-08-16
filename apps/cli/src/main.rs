@@ -65,11 +65,14 @@ fn init() -> anyhow::Result<()> {
         }
         Err(error) => return Err(error.into()),
     };
-    let (contents, postgres_changed) = fill_blank_env(
-        existing,
-        "POSTGRES_PASSWORD",
-        &URL_SAFE_NO_PAD.encode(postgres),
-    );
+    let legacy_database = uses_legacy_compose_database(&existing);
+    let postgres_password = if legacy_database {
+        "nopager".to_owned()
+    } else {
+        URL_SAFE_NO_PAD.encode(postgres)
+    };
+    let (contents, postgres_changed) =
+        fill_blank_env(existing, "POSTGRES_PASSWORD", &postgres_password);
     let (contents, master_changed) =
         fill_blank_env(contents, "NOPAGER_MASTER_KEY", &STANDARD.encode(master));
     let (contents, admin_changed) =
@@ -80,12 +83,27 @@ fn init() -> anyhow::Result<()> {
         || !std::path::Path::new(".env").exists()
     {
         fs::write(".env", contents)?;
-        println!("Created or completed .env with fresh local secrets.");
+        println!("Created or completed .env with local secrets.");
+        if legacy_database && postgres_changed {
+            eprintln!(
+                "Preserved the legacy Alpha PostgreSQL password so the existing Docker volume remains bootable."
+            );
+        }
     } else {
         println!(".env already contains local secrets; left them unchanged.");
     }
     println!("Continue setup at {}/setup", web_url());
     Ok(())
+}
+
+fn uses_legacy_compose_database(contents: &str) -> bool {
+    !contents
+        .lines()
+        .any(|line| line.starts_with("POSTGRES_PASSWORD=") && line.len() > "POSTGRES_PASSWORD=".len())
+        && contents.lines().any(|line| {
+            line.trim()
+                .starts_with("DATABASE_URL=postgresql://nopager:nopager@postgres:")
+        })
 }
 
 fn fill_blank_env(mut contents: String, name: &str, value: &str) -> (String, bool) {
@@ -307,6 +325,19 @@ mod tests {
         assert!(!changed);
         assert!(contents.contains("NOPAGER_ADMIN_TOKEN=keep-me"));
         assert!(!contents.contains("replacement"));
+    }
+
+    #[test]
+    fn detects_legacy_compose_database_without_new_password() {
+        assert!(uses_legacy_compose_database(
+            "DATABASE_URL=postgresql://nopager:nopager@postgres:5432/nopager\n"
+        ));
+        assert!(!uses_legacy_compose_database(
+            "POSTGRES_PASSWORD=random\nDATABASE_URL=postgresql://nopager:nopager@postgres:5432/nopager\n"
+        ));
+        assert!(!uses_legacy_compose_database(
+            "DATABASE_URL=postgresql://nopager:nopager@localhost:5432/nopager\n"
+        ));
     }
 
     #[test]
