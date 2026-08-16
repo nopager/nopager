@@ -173,25 +173,24 @@ export default async function IncidentDetailPage({
 function incidentOutcome(incident: IncidentDetail) {
   switch (incident.status) {
     case "RESOLVED":
-    case "ROLLED_BACK":
       return {
-        label:
-          incident.status === "ROLLED_BACK"
-            ? "Rolled back safely"
-            : incident.autonomousResolution
-              ? "Resolved autonomously"
-              : "Resolved",
-        headline:
-          incident.status === "ROLLED_BACK"
-            ? "The previous known-good deployment was restored."
-            : "Production is healthy again.",
+        label: incident.autonomousResolution
+          ? "Resolved autonomously"
+          : "Resolved",
+        headline: "Production is healthy again.",
         message:
           incident.rootCauseSummary ??
-          (incident.status === "ROLLED_BACK"
-            ? "NoPager restored the previous known-good production deployment."
-            : "NoPager completed the repair and production verification."),
-        nextStep:
-          "No action needed. The incident remains available for audit.",
+          "NoPager completed the repair and production verification.",
+        nextStep: "No action needed. The incident remains available for audit.",
+      };
+    case "ROLLED_BACK":
+      return {
+        label: "Rolled back safely",
+        headline: "The previous known-good deployment was restored.",
+        message:
+          incident.rootCauseSummary ??
+          "NoPager restored the previous known-good production deployment.",
+        nextStep: "No action needed. The incident remains available for audit.",
       };
     case "WAITING_APPROVAL":
       return {
@@ -256,15 +255,19 @@ function incidentOutcome(incident: IncidentDetail) {
         nextStep: "Production remains on the previously approved deployment.",
       };
     case "IGNORED":
-    case "DUPLICATE":
       return {
         label: "No production action required",
-        headline: "This incident does not require another repair flow.",
+        headline: "This incident was intentionally ignored.",
+        message: "No production mutation is scheduled from this incident.",
+        nextStep: "No action needed unless the incident should be reopened.",
+      };
+    case "DUPLICATE":
+      return {
+        label: "Duplicate incident",
+        headline: "This signal belongs to an existing incident.",
         message:
-          incident.status === "DUPLICATE"
-            ? "The signal was linked to an existing incident instead of starting duplicate remediation."
-            : "The signal was intentionally ignored by the incident workflow.",
-        nextStep: "No production mutation is scheduled from this incident.",
+          "NoPager linked the signal to the existing incident instead of starting duplicate remediation.",
+        nextStep: "Review the active incident for the current repair status.",
       };
     default:
       return {
