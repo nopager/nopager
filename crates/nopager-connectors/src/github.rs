@@ -464,7 +464,11 @@ impl GitHubClient {
 fn commit_message_with_patch_context(message: &str, files: &[CommitFile]) -> String {
     let mut context = String::new();
     for file in files {
-        let Some(patch) = file.patch.as_deref().filter(|patch| !patch.trim().is_empty()) else {
+        let Some(patch) = file
+            .patch
+            .as_deref()
+            .filter(|patch| !patch.trim().is_empty())
+        else {
             continue;
         };
         let patch = truncate_chars(patch, MAX_FILE_PATCH_CHARS);
@@ -637,7 +641,13 @@ mod tests {
         assert!(message.contains(SOURCE_CONTEXT_MARKER));
         assert!(message.contains("FILE: src/login.ts"));
         assert!(message.contains("-old\n+new"));
-        assert!(message.chars().count() <= "fix login\n\n---\n".chars().count() + SOURCE_CONTEXT_MARKER.chars().count() + MAX_COMMIT_CONTEXT_CHARS + 100);
+        assert!(
+            message.chars().count()
+                <= "fix login\n\n---\n".chars().count()
+                    + SOURCE_CONTEXT_MARKER.chars().count()
+                    + MAX_COMMIT_CONTEXT_CHARS
+                    + 100
+        );
     }
 
     #[test]
@@ -646,6 +656,9 @@ mod tests {
             filename: "public/logo.png".into(),
             patch: None,
         }];
-        assert_eq!(commit_message_with_patch_context("assets", &files), "assets");
+        assert_eq!(
+            commit_message_with_patch_context("assets", &files),
+            "assets"
+        );
     }
 }
