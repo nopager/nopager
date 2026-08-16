@@ -1,0 +1,585 @@
+name: Direct-use onboarding patch
+
+on:
+  push:
+    branches: [directly-usable-alpha]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: directly-usable-alpha
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          components: rustfmt
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Patch setup discovery and UX
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_between(text: str, start: str, end: str, replacement: str) -> str:
+              a = text.index(start)
+              b = text.index(end, a)
+              return text[:a] + replacement + text[b:]
+
+          server_path = Path('apps/server/src/main.rs')
+          server = server_path.read_text()
+
+          server = replace_between(
+              server,
+              '#[derive(Deserialize)]\n#[serde(rename_all = "camelCase")]\nstruct ProtectAppRequest {',
+              '#[derive(Deserialize)]\nstruct SafetyModeRequest',
+              '''#[derive(Deserialize)]
+          #[serde(rename_all = "camelCase")]
+          struct ProtectAppRequest {
+              name: String,
+              repo_owner: String,
+              repo_name: String,
+              github_app_id: u64,
+              github_installation_id: u64,
+              github_private_key: String,
+              github_webhook_secret: String,
+              #[serde(default)]
+              vercel_team_id: String,
+              vercel_project_id: String,
+              vercel_token: String,
+              vercel_webhook_secret: String,
+              provider: String,
+              provider_api_key: String,
+              provider_model: String,
+              production_url: String,
+              health_check_url: String,
+              safety_mode: String,
+          }
+
+          ''',
+          )
+
+          server = replace_between(
+              server,
+              '#[derive(Deserialize)]\n#[serde(rename_all = "camelCase")]\nstruct GitHubConnectionRequest {',
+              '#[derive(Deserialize)]\n#[serde(rename_all = "camelCase")]\nstruct ProviderConnectionRequest',
+              '''#[derive(Deserialize)]
+          #[serde(rename_all = "camelCase")]
+          struct GitHubConnectionRequest {
+              app_id: u64,
+              installation_id: u64,
+              private_key: String,
+              repo_owner: String,
+              repo_name: String,
+          }
+
+          #[derive(Deserialize)]
+          #[serde(rename_all = "camelCase")]
+          struct VercelConnectionRequest {
+              #[serde(default)]
+              team_id: String,
+              project_id: String,
+              token: String,
+          }
+
+          ''',
+          )
+
+          server = replace_between(
+              server,
+              'async fn test_github_connection(',
+              'async fn test_provider_connection(',
+              '''async fn test_github_connection(
+              State(state): State<ServerState>,
+              headers: HeaderMap,
+              Json(request): Json<GitHubConnectionRequest>,
+          ) -> (StatusCode, Json<Value>) {
+              if !authorized(&state, &headers).await {
+                  return api_error(StatusCode::UNAUTHORIZED, "unauthorized");
+              }
+              let auth = match GitHubAppAuth::new(
+                  request.app_id,
+                  request.installation_id,
+                  SecretString::from(normalize_pem(&request.private_key)),
+              ) {
+                  Ok(auth) => auth,
+                  Err(error) => {
+                      tracing::warn!(%error, "GitHub connection configuration failed");
+                      return api_error(StatusCode::UNPROCESSABLE_ENTITY, "github_connection_failed");
+                  }
+              };
+              let client = match auth.installation_client(&request.repo_name).await {
+                  Ok(client) => client,
+                  Err(error) => {
+                      tracing::warn!(%error, "GitHub installation token test failed");
+                      return api_error(StatusCode::UNPROCESSABLE_ENTITY, "github_connection_failed");
+                  }
+              };
+              match client.get_repository(&request.repo_owner, &request.repo_name).await {
+                  Ok(repository) => (
+                      StatusCode::OK,
+                      Json(json!({
+                          "connected": true,
+                          "repository": {
+                              "id": repository.id,
+                              "fullName": repository.full_name,
+                              "defaultBranch": repository.default_branch
+                          }
+                      })),
+                  ),
+                  Err(error) => {
+                      tracing::warn!(%error, "GitHub repository access test failed");
+                      api_error(StatusCode::UNPROCESSABLE_ENTITY, "github_repository_not_accessible")
+                  }
+              }
+          }
+
+          async fn test_vercel_connection(
+              State(state): State<ServerState>,
+              headers: HeaderMap,
+              Json(request): Json<VercelConnectionRequest>,
+          ) -> (StatusCode, Json<Value>) {
+              if !authorized(&state, &headers).await {
+                  return api_error(StatusCode::UNAUTHORIZED, "unauthorized");
+              }
+              let client = match VercelClient::new(
+                  SecretString::from(request.token),
+                  optional_nonempty(&request.team_id),
+              ) {
+                  Ok(client) => client,
+                  Err(error) => {
+                      tracing::warn!(%error, "Vercel connection configuration failed");
+                      return api_error(StatusCode::UNPROCESSABLE_ENTITY, "vercel_connection_failed");
+                  }
+              };
+              let project = match client.get_project(&request.project_id).await {
+                  Ok(project) => project,
+                  Err(error) => {
+                      tracing::warn!(%error, "Vercel project lookup failed");
+                      return api_error(StatusCode::UNPROCESSABLE_ENTITY, "vercel_project_not_accessible");
+                  }
+              };
+              match client.list_deployments(&project.id, 10).await {
+                  Ok(deployments) if deployments.iter().any(|deployment| deployment.target.as_deref() == Some("production")) => (
+                      StatusCode::OK,
+                      Json(json!({
+                          "connected": true,
+                          "project": { "id": project.id, "name": project.name },
+                          "productionDeploymentFound": true
+                      })),
+                  ),
+                  Ok(_) => api_error(
+                      StatusCode::UNPROCESSABLE_ENTITY,
+                      "vercel_production_deployment_not_found",
+                  ),
+                  Err(error) => {
+                      tracing::warn!(%error, "Vercel connection test failed");
+                      api_error(StatusCode::UNPROCESSABLE_ENTITY, "vercel_connection_failed")
+                  }
+              }
+          }
+
+          ''',
+          )
+
+          server = replace_between(
+              server,
+              'async fn protect_app(',
+              'fn slugify(value: &str) -> String {',
+              '''async fn protect_app(
+              State(state): State<ServerState>,
+              headers: HeaderMap,
+              Json(request): Json<ProtectAppRequest>,
+          ) -> Response {
+              if !authorized(&state, &headers).await {
+                  return api_error(StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+              }
+              let Some(database) = &state.database else {
+                  return api_error(StatusCode::SERVICE_UNAVAILABLE, "database_not_configured")
+                      .into_response();
+              };
+              let Some(cipher) = &state.secret_cipher else {
+                  return api_error(StatusCode::SERVICE_UNAVAILABLE, "master_key_not_configured")
+                      .into_response();
+              };
+              let production_url = match Url::parse(&request.production_url) {
+                  Ok(url) if validate_health_url(&url).is_ok() => url,
+                  _ => return api_error(StatusCode::BAD_REQUEST, "unsafe_production_url").into_response(),
+              };
+              let health_check_url = match Url::parse(&request.health_check_url) {
+                  Ok(url) if validate_health_url(&url).is_ok() => url,
+                  _ => return api_error(StatusCode::BAD_REQUEST, "unsafe_health_check_url").into_response(),
+              };
+              if !valid_setup(&request) {
+                  return api_error(StatusCode::BAD_REQUEST, "invalid_setup").into_response();
+              }
+              match check_http(&health_check_url, 200, std::time::Duration::from_secs(10)).await {
+                  Ok(observation) if observation.success => {}
+                  Ok(_) => {
+                      return api_error(StatusCode::UNPROCESSABLE_ENTITY, "production_health_failed")
+                          .into_response();
+                  }
+                  Err(error) => {
+                      tracing::warn!(%error, "production health connection test failed");
+                      return api_error(StatusCode::UNPROCESSABLE_ENTITY, "production_health_failed")
+                          .into_response();
+                  }
+              }
+
+              let github_private_key = normalize_pem(&request.github_private_key);
+              let github_client = match GitHubAppAuth::new(
+                  request.github_app_id,
+                  request.github_installation_id,
+                  SecretString::from(github_private_key.clone()),
+              ) {
+                  Ok(auth) => match auth.installation_client(&request.repo_name).await {
+                      Ok(client) => client,
+                      Err(error) => {
+                          tracing::warn!(%error, "GitHub setup installation token test failed");
+                          return api_error(StatusCode::UNPROCESSABLE_ENTITY, "github_connection_failed")
+                              .into_response();
+                      }
+                  },
+                  Err(error) => {
+                      tracing::warn!(%error, "GitHub setup configuration failed");
+                      return api_error(StatusCode::UNPROCESSABLE_ENTITY, "github_connection_failed")
+                          .into_response();
+                  }
+              };
+              let github_repository = match github_client
+                  .get_repository(&request.repo_owner, &request.repo_name)
+                  .await
+              {
+                  Ok(repository) => repository,
+                  Err(error) => {
+                      tracing::warn!(%error, "GitHub setup repository lookup failed");
+                      return api_error(StatusCode::UNPROCESSABLE_ENTITY, "github_repository_not_accessible")
+                          .into_response();
+                  }
+              };
+
+              let team_id = optional_nonempty(&request.vercel_team_id);
+              let vercel = match VercelClient::new(
+                  SecretString::from(request.vercel_token.clone()),
+                  team_id.clone(),
+              ) {
+                  Ok(client) => client,
+                  Err(error) => {
+                      tracing::warn!(%error, "Vercel setup configuration failed");
+                      return api_error(StatusCode::UNPROCESSABLE_ENTITY, "vercel_connection_failed")
+                          .into_response();
+                  }
+              };
+              let vercel_project = match vercel.get_project(&request.vercel_project_id).await {
+                  Ok(project) => project,
+                  Err(error) => {
+                      tracing::warn!(%error, "Vercel setup project lookup failed");
+                      return api_error(StatusCode::UNPROCESSABLE_ENTITY, "vercel_project_not_accessible")
+                          .into_response();
+                  }
+              };
+              let deployments = match vercel.list_deployments(&vercel_project.id, 10).await {
+                  Ok(deployments) => deployments,
+                  Err(error) => {
+                      tracing::warn!(%error, "Vercel setup connection test failed");
+                      return api_error(StatusCode::UNPROCESSABLE_ENTITY, "vercel_connection_failed")
+                          .into_response();
+                  }
+              };
+              let Some(initial_deployment) = deployments
+                  .into_iter()
+                  .find(|deployment| deployment.target.as_deref() == Some("production"))
+              else {
+                  return api_error(
+                      StatusCode::UNPROCESSABLE_ENTITY,
+                      "vercel_production_deployment_not_found",
+                  )
+                  .into_response();
+              };
+
+              let provider = match configured_provider(
+                  &request.provider,
+                  request.provider_api_key.clone(),
+                  request.provider_model.clone(),
+              ) {
+                  Ok(provider) => provider,
+                  Err(()) => return api_error(StatusCode::BAD_REQUEST, "unsupported_provider").into_response(),
+              };
+              if let Err(error) = provider.test_connection().await {
+                  tracing::warn!(%error, "model provider setup connection test failed");
+                  return api_error(StatusCode::UNPROCESSABLE_ENTITY, "provider_connection_failed")
+                      .into_response();
+              }
+
+              let encrypt = |value: Value| cipher.encrypt(&SecretString::from(value.to_string()));
+              let provider_key_suffix = request
+                  .provider_api_key
+                  .chars()
+                  .rev()
+                  .take(4)
+                  .collect::<Vec<_>>()
+                  .into_iter()
+                  .rev()
+                  .collect::<String>();
+              let github_credentials = match encrypt(json!({
+                  "appId": request.github_app_id,
+                  "installationId": request.github_installation_id,
+                  "privateKey": github_private_key,
+                  "webhookSecret": request.github_webhook_secret
+              })) {
+                  Ok(value) => value,
+                  Err(error) => return encryption_error(error),
+              };
+              let vercel_credentials = match encrypt(json!({
+                  "token": request.vercel_token,
+                  "webhookSecret": request.vercel_webhook_secret
+              })) {
+                  Ok(value) => value,
+                  Err(error) => return encryption_error(error),
+              };
+              let provider_credentials = match encrypt(json!({ "apiKey": request.provider_api_key })) {
+                  Ok(value) => value,
+                  Err(error) => return encryption_error(error),
+              };
+              let slug = slugify(&request.name);
+              let safety_mode = if request.safety_mode == "autopilot" {
+                  "autopilot_experimental".to_owned()
+              } else {
+                  request.safety_mode
+              };
+              let setup = ProtectedAppSetup {
+                  name: request.name,
+                  slug,
+                  repo_owner: request.repo_owner.clone(),
+                  repo_name: request.repo_name.clone(),
+                  production_url: production_url.to_string(),
+                  health_check_url: health_check_url.to_string(),
+                  safety_mode,
+                  github_external_account_id: request.github_installation_id.to_string(),
+                  github_external_project_id: github_repository.full_name.clone(),
+                  github_credentials,
+                  github_metadata: json!({
+                      "repoId": github_repository.id,
+                      "baseBranch": github_repository.default_branch
+                  }),
+                  vercel_external_account_id: team_id.clone().unwrap_or_else(|| "personal".into()),
+                  vercel_external_project_id: vercel_project.id.clone(),
+                  vercel_credentials,
+                  vercel_metadata: json!({
+                      "projectName": vercel_project.name,
+                      "teamId": team_id
+                  }),
+                  provider_external_account_id: request.provider.clone(),
+                  provider_credentials,
+                  provider_metadata: json!({
+                      "provider": request.provider,
+                      "model": request.provider_model,
+                      "keySuffix": provider_key_suffix
+                  }),
+                  initial_deployment_id: initial_deployment.id,
+                  initial_deployment_url: https_url(&initial_deployment.url),
+                  initial_deployment_sha: initial_deployment
+                      .meta
+                      .get("githubCommitSha")
+                      .and_then(Value::as_str)
+                      .unwrap_or("unknown")
+                      .to_owned(),
+              };
+              match database.create_protected_app(&setup).await {
+                  Ok(project_id) => (
+                      StatusCode::CREATED,
+                      Json(json!({ "protected": true, "projectId": project_id })),
+                  )
+                      .into_response(),
+                  Err(nopager_db::DatabaseError::ProjectAlreadyExists) => {
+                      api_error(StatusCode::CONFLICT, "app_already_protected").into_response()
+                  }
+                  Err(error) => {
+                      tracing::error!(%error, "failed to create protected app");
+                      api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error").into_response()
+                  }
+              }
+          }
+
+          fn valid_setup(request: &ProtectAppRequest) -> bool {
+              !request.name.trim().is_empty()
+                  && request.name.len() <= 100
+                  && !request.repo_owner.trim().is_empty()
+                  && !request.repo_name.trim().is_empty()
+                  && request.github_app_id > 0
+                  && request.github_installation_id > 0
+                  && !request.github_private_key.trim().is_empty()
+                  && request.github_webhook_secret.len() >= 16
+                  && !request.vercel_project_id.trim().is_empty()
+                  && !request.vercel_token.trim().is_empty()
+                  && request.vercel_webhook_secret.len() >= 16
+                  && matches!(request.provider.as_str(), "openai" | "anthropic" | "gemini")
+                  && !request.provider_api_key.trim().is_empty()
+                  && !request.provider_model.trim().is_empty()
+                  && matches!(request.safety_mode.as_str(), "safe" | "autopilot")
+          }
+
+          fn normalize_pem(value: &str) -> String {
+              value.trim().replace("\\\\n", "\n")
+          }
+
+          fn optional_nonempty(value: &str) -> Option<String> {
+              let value = value.trim();
+              (!value.is_empty()).then(|| value.to_owned())
+          }
+
+          ''',
+          )
+
+          server_path.write_text(server)
+
+          web_path = Path('apps/web/app/setup/page.tsx')
+          web = web_path.read_text()
+          web = web.replace('  githubRepoId: string;\n', '')
+          web = web.replace('  vercelProjectName: string;\n', '')
+          web = web.replace('  githubRepoId: "",\n', '')
+          web = web.replace('  vercelProjectName: "",\n', '')
+          web = web.replace('''              privateKey: data.githubPrivateKey,
+              repoName: data.repoName,
+          ''', '''              privateKey: data.githubPrivateKey,
+              repoOwner: data.repoOwner,
+              repoName: data.repoName,
+          ''')
+          web = web.replace('''            ...data,
+              githubAppId: Number(data.githubAppId),
+              githubInstallationId: Number(data.githubInstallationId),
+              githubRepoId: Number(data.githubRepoId),
+          ''', '''            ...data,
+              githubAppId: Number(data.githubAppId),
+              githubInstallationId: Number(data.githubInstallationId),
+          ''')
+          web = web.replace('''          <Summary
+              label="Vercel"
+              value={data.vercelProjectName || "Connected"}
+            />
+          ''', '''          <Summary label="Vercel" value={data.vercelProjectId || "Connected"} />
+          ''')
+          web = web.replace('''        <Input
+              label="Repository numeric ID"
+              value={data.githubRepoId}
+              onChange={(v) => update("githubRepoId", v)}
+            />
+          ''', '')
+          web = web.replace('''        <Input
+              full
+              label="GitHub App private key (PEM)"
+              type="password"
+              value={data.githubPrivateKey}
+              onChange={(v) => update("githubPrivateKey", v)}
+            />
+          ''', '''        <TextArea
+              label="GitHub App private key (PEM)"
+              value={data.githubPrivateKey}
+              onChange={(v) => update("githubPrivateKey", v)}
+            />
+          ''')
+          web = web.replace('''        <Input
+              label="Team ID"
+              value={data.vercelTeamId}
+              onChange={(v) => update("vercelTeamId", v)}
+            />
+          ''', '''        <Input
+              label="Team ID (optional for personal account)"
+              value={data.vercelTeamId}
+              onChange={(v) => update("vercelTeamId", v)}
+              required={false}
+            />
+          ''')
+          web = web.replace('''        <Input
+              label="Project ID"
+              value={data.vercelProjectId}
+              onChange={(v) => update("vercelProjectId", v)}
+            />
+            <Input
+              label="Project name"
+              value={data.vercelProjectName}
+              onChange={(v) => update("vercelProjectName", v)}
+            />
+          ''', '''        <Input
+              label="Project ID or project name"
+              value={data.vercelProjectId}
+              onChange={(v) => update("vercelProjectId", v)}
+            />
+          ''')
+          web = web.replace('''  full = false,
+          }: {
+            label: string;
+            value: string;
+            onChange: (value: string) => void;
+            type?: string;
+            full?: boolean;
+          }) {
+          ''', '''  full = false,
+            required = true,
+          }: {
+            label: string;
+            value: string;
+            onChange: (value: string) => void;
+            type?: string;
+            full?: boolean;
+            required?: boolean;
+          }) {
+          ''')
+          web = web.replace('''      <input
+              required
+              type={type}
+          ''', '''      <input
+              required={required}
+              type={type}
+          ''')
+          marker = '''function fields(
+          '''
+          textarea = '''function TextArea({
+            label,
+            value,
+            onChange,
+          }: {
+            label: string;
+            value: string;
+            onChange: (value: string) => void;
+          }) {
+            return (
+              <label className="full">
+                {label}
+                <textarea
+                  required
+                  rows={9}
+                  value={value}
+                  onChange={(event) => onChange(event.target.value)}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                <small>Paste the complete PEM block, including BEGIN/END lines.</small>
+              </label>
+            );
+          }
+
+          '''
+          if 'function TextArea(' not in web:
+              web = web.replace(marker, textarea + marker, 1)
+          web_path.write_text(web)
+          PY
+          cargo fmt --all
+          pnpm exec prettier --write apps/web/app/setup/page.tsx
+          git diff --check
+      - name: Commit direct-use onboarding changes
+        run: |
+          git config user.name "NoPager CI"
+          git config user.email "actions@users.noreply.github.com"
+          git add apps/server/src/main.rs apps/web/app/setup/page.tsx
+          git rm .github/workflows/direct-use-setup-patch.yml
+          git commit -m "Make GitHub and Vercel onboarding directly usable"
+          git push origin HEAD:directly-usable-alpha
