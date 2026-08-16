@@ -1,0 +1,295 @@
+name: Vercel polling fallback patch
+
+on:
+  push:
+    branches: [directly-usable-alpha]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: directly-usable-alpha
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          components: rustfmt
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: pnpm install --frozen-lockfile
+      - name: Add Vercel polling fallback
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          # Vercel connector: expose creation/state and support server-side `since` filtering.
+          path = Path('crates/nopager-connectors/src/vercel.rs')
+          text = path.read_text()
+          if 'pub state: Option<String>' not in text:
+              text = text.replace(
+                  '''    #[serde(default)]
+              pub ready_state: Option<String>,
+              ''',
+                  '''    #[serde(default)]
+              pub ready_state: Option<String>,
+              #[serde(default)]
+              pub state: Option<String>,
+              #[serde(default)]
+              pub created: Option<i64>,
+              ''',
+                  1,
+              )
+          start = text.index('    pub async fn list_deployments(')
+          end = text.index('    pub async fn create_preview(', start)
+          text = text[:start] + '''    pub async fn list_deployments(
+              &self,
+              project_id: &str,
+              limit: u8,
+          ) -> Result<Vec<Deployment>, ConnectorError> {
+              self.list_deployments_since(project_id, limit, None).await
+          }
+
+          pub async fn list_deployments_since(
+              &self,
+              project_id: &str,
+              limit: u8,
+              since_ms: Option<i64>,
+          ) -> Result<Vec<Deployment>, ConnectorError> {
+              validate_id(project_id)?;
+              let limit = limit.min(100).to_string();
+              let mut request = self
+                  .request(Method::GET, "v6/deployments")?
+                  .query(&[("projectId", project_id), ("limit", limit.as_str())]);
+              if let Some(since_ms) = since_ms {
+                  let since = since_ms.to_string();
+                  request = request.query(&[("since", since.as_str())]);
+              }
+              let response = request.send().await?;
+              Ok(decode::<DeploymentList>(response).await?.deployments)
+          }
+
+          ''' + text[end:]
+          # Extend test helper literals after adding fields.
+          text = text.replace(
+              '''            ready_state: Some("READY".into()),
+                  target: target.map(ToOwned::to_owned),
+              ''',
+              '''            ready_state: Some("READY".into()),
+                  state: None,
+                  created: None,
+                  target: target.map(ToOwned::to_owned),
+              ''',
+          )
+          path.write_text(text)
+
+          # Database: one idempotent polling job per connected Vercel project every 30 seconds.
+          path = Path('crates/nopager-db/src/lib.rs')
+          text = path.read_text()
+          if 'pub async fn enqueue_due_vercel_polls' not in text:
+              marker = '    pub async fn health_check(&self, id: Uuid) -> Result<HealthCheck, DatabaseError> {'
+              insertion = '''    pub async fn enqueue_due_vercel_polls(&self, limit: i64) -> Result<u64, DatabaseError> {
+              let targets = sqlx::query_as::<_, (Uuid, String, OffsetDateTime)>(
+                  "SELECT i.project_id, i.external_project_id, i.created_at
+                   FROM integrations i
+                   JOIN projects p ON p.id = i.project_id
+                   WHERE i.type = 'vercel'
+                     AND i.status = 'CONNECTED'
+                     AND i.external_project_id IS NOT NULL
+                     AND p.status = 'ACTIVE'
+                   ORDER BY i.created_at
+                   LIMIT $1",
+              )
+              .bind(limit.clamp(1, 1000))
+              .fetch_all(&self.pool)
+              .await?;
+              let bucket = OffsetDateTime::now_utc().unix_timestamp() / 30;
+              for (project_id, external_project_id, connected_at) in &targets {
+                  let since_ms = connected_at.unix_timestamp().saturating_mul(1000);
+                  self.enqueue(
+                      JobType::VercelPoll,
+                      &format!("vercel-poll:{project_id}:{bucket}"),
+                      None,
+                      &serde_json::json!({
+                          "projectId": project_id,
+                          "vercelProjectId": external_project_id,
+                          "sinceMs": since_ms
+                      }),
+                      3,
+                  )
+                  .await?;
+              }
+              Ok(targets.len() as u64)
+          }
+
+          '''
+              text = text.replace(marker, insertion + marker, 1)
+          if '    VercelPoll,' not in text:
+              text = text.replace('    HealthCheck,\n    WebhookProcess,', '    HealthCheck,\n    VercelPoll,\n    WebhookProcess,', 1)
+          if 'Self::VercelPoll => "vercel-poll"' not in text:
+              text = text.replace(
+                  '            Self::HealthCheck => "health-check",\n            Self::WebhookProcess => "webhook-process",',
+                  '            Self::HealthCheck => "health-check",\n            Self::VercelPoll => "vercel-poll",\n            Self::WebhookProcess => "webhook-process",',
+                  1,
+              )
+          path.write_text(text)
+
+          # Worker: schedule and process polling fallback. Webhooks remain a faster optional path.
+          path = Path('apps/worker/src/main.rs')
+          text = path.read_text()
+          if 'failed to schedule Vercel polling fallback' not in text:
+              old = '''                if let Err(error) = database.enqueue_due_health_checks(100).await {
+                      error!(%error, "failed to schedule health checks");
+                  }
+              '''
+              new = old + '''                if let Err(error) = database.enqueue_due_vercel_polls(100).await {
+                      error!(%error, "failed to schedule Vercel polling fallback");
+                  }
+              '''
+              text = text.replace(old, new, 1)
+          if '"vercel-poll" => process_vercel_poll' not in text:
+              text = text.replace(
+                  '        "health-check" => process_health_check(database, &job.payload_json).await,\n',
+                  '        "health-check" => process_health_check(database, &job.payload_json).await,\n        "vercel-poll" => process_vercel_poll(database, &job.payload_json).await,\n',
+                  1,
+              )
+          if 'async fn process_vercel_poll(' not in text:
+              marker = 'async fn process_webhook(database: &Database, payload: &Value) -> anyhow::Result<()> {'
+              insertion = '''async fn process_vercel_poll(database: &Database, payload: &Value) -> anyhow::Result<()> {
+              let project_id: uuid::Uuid = required_string(payload, "projectId")?.parse()?;
+              let vercel_project_id = required_string(payload, "vercelProjectId")?;
+              let since_ms = payload
+                  .get("sinceMs")
+                  .and_then(Value::as_i64)
+                  .ok_or_else(|| anyhow::anyhow!("sinceMs is missing"))?;
+              let integration = database.integration_secret(project_id, "vercel").await?;
+              let credentials = decrypt_credentials(&integration.encrypted_credentials)?;
+              let token = required_string(&credentials, "token")?;
+              let team_id = integration
+                  .metadata
+                  .get("teamId")
+                  .and_then(Value::as_str)
+                  .map(str::trim)
+                  .filter(|value| !value.is_empty())
+                  .map(ToOwned::to_owned);
+              let client = VercelClient::new(SecretString::from(token.to_owned()), team_id)?;
+              let deployments = client
+                  .list_deployments_since(vercel_project_id, 20, Some(since_ms))
+                  .await?;
+
+              for deployment in deployments {
+                  if deployment.target.as_deref() != Some("production") {
+                      continue;
+                  }
+                  let state = deployment
+                      .ready_state
+                      .as_deref()
+                      .or(deployment.state.as_deref())
+                      .unwrap_or("UNKNOWN");
+                  let url = https_url(&deployment.url);
+                  let sha = deployment
+                      .meta
+                      .get("githubCommitSha")
+                      .and_then(Value::as_str)
+                      .unwrap_or("unknown");
+                  database
+                      .save_deployment(
+                          project_id,
+                          &deployment.id,
+                          "production",
+                          sha,
+                          &url,
+                          state,
+                          false,
+                      )
+                      .await?;
+
+                  if matches!(state, "ERROR" | "CANCELED" | "CANCELLED") {
+                      database
+                          .open_incident(&IncidentTrigger {
+                              project_id,
+                              deduplication_key: format!("vercel-deployment:{}", deployment.id),
+                              trigger_type: "VERCEL_DEPLOYMENT_FAILED".into(),
+                              severity: "high".into(),
+                              title: "Vercel production deployment failed".into(),
+                              metadata: json!({
+                                  "source": "vercel-poll",
+                                  "deployment": {
+                                      "id": deployment.id,
+                                      "url": url,
+                                      "target": deployment.target,
+                                      "state": state,
+                                      "created": deployment.created,
+                                      "meta": deployment.meta
+                                  }
+                              }),
+                          })
+                          .await?;
+                  }
+              }
+              Ok(())
+          }
+
+          '''
+              text = text.replace(marker, insertion + marker, 1)
+          path.write_text(text)
+
+          # Server: Vercel webhook is optional because the worker now polls deployments.
+          path = Path('apps/server/src/main.rs')
+          text = path.read_text()
+          if '#[serde(default)]\n    vercel_webhook_secret: String,' not in text:
+              text = text.replace(
+                  '    vercel_token: String,\n    vercel_webhook_secret: String,',
+                  '    vercel_token: String,\n    #[serde(default)]\n    vercel_webhook_secret: String,',
+                  1,
+              )
+          text = text.replace(
+              '        && request.vercel_webhook_secret.len() >= 16\n',
+              '',
+              1,
+          )
+          path.write_text(text)
+
+          # Web: optional Vercel webhook secret, with polling fallback made explicit.
+          path = Path('apps/web/app/setup/page.tsx')
+          text = path.read_text()
+          old = '''        <Input
+                  label="Webhook secret"
+                  type="password"
+                  value={data.vercelWebhookSecret}
+                  onChange={(v) => update("vercelWebhookSecret", v)}
+                />
+          '''
+          new = '''        <Input
+                  label="Webhook secret (optional; polling fallback is always enabled)"
+                  type="password"
+                  value={data.vercelWebhookSecret}
+                  onChange={(v) => update("vercelWebhookSecret", v)}
+                  required={false}
+                />
+          '''
+          # Only replace the Vercel occurrence by searching after step === 2.
+          start = text.index('  if (step === 2)')
+          pos = text.find(old, start)
+          if pos != -1:
+              text = text[:pos] + new + text[pos + len(old):]
+          path.write_text(text)
+          PY
+          cargo fmt --all
+          pnpm exec prettier --write apps/web/app/setup/page.tsx
+          git diff --check
+      - name: Commit polling fallback and remove one-shot workflow
+        run: |
+          git config user.name "NoPager CI"
+          git config user.email "actions@users.noreply.github.com"
+          git add crates/nopager-connectors/src/vercel.rs crates/nopager-db/src/lib.rs apps/worker/src/main.rs apps/server/src/main.rs apps/web/app/setup/page.tsx
+          git rm .github/workflows/vercel-polling-patch.yml
+          git commit -m "Add Vercel polling fallback for Hobby-friendly detection"
+          git push origin HEAD:directly-usable-alpha
