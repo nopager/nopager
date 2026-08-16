@@ -44,7 +44,6 @@ jobs:
 
           path = Path('.env')
           values = {
-              'POSTGRES_PASSWORD': 'ci-private-postgres-password',
               'NOPAGER_MASTER_KEY': 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=',
               'NOPAGER_ADMIN_TOKEN': 'ci-smoke-operator-token',
               'NOPAGER_WEB_BIND': '127.0.0.1',
@@ -64,9 +63,14 @@ jobs:
                   rendered.append(f'{key}={value}')
           path.write_text('\n'.join(rendered) + '\n')
           PY
-      - run: docker compose config --quiet
       - name: Run user-facing quickstart
         run: sh scripts/quickstart.sh
+      - name: Verify generated self-host database credential
+        run: |
+          password=$(awk -F= '$1 == "POSTGRES_PASSWORD" { sub(/^[^=]*=/, ""); print; exit }' .env)
+          test -n "$password"
+          test "$password" != "nopager"
+          docker compose config --quiet
       - name: Verify Rust setup API
         run: curl --fail --show-error --silent http://127.0.0.1:8080/api/v1/setup/status >/dev/null
       - name: Verify web console and API proxy
