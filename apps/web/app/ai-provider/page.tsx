@@ -1,10 +1,28 @@
+import Link from "next/link";
 import { Card, PageHeader, SectionTitle } from "@/components/ui";
 import { api, type AppSettings } from "@/lib/api";
 import { maskSecret } from "@/lib/model";
 
 export default async function AiProviderPage() {
   const settings = await api<AppSettings>("settings");
-  const provider = settings?.integrations.find(
+  if (!settings) {
+    return (
+      <div className="page">
+        <PageHeader
+          eyebrow="Bring your own key"
+          title="AI Provider unavailable"
+          description="Sign in or complete setup before viewing model configuration."
+          action={
+            <Link className="primary-button link-button" href="/setup">
+              Open setup
+            </Link>
+          }
+        />
+      </div>
+    );
+  }
+
+  const provider = settings.integrations.find(
     (item) => item.type === "model_provider",
   );
   const name =
@@ -13,6 +31,7 @@ export default async function AiProviderPage() {
     "Not configured";
   const model = string(provider?.metadata.model) ?? "—";
   const suffix = string(provider?.metadata.keySuffix) ?? "••••";
+  const connected = provider?.status === "CONNECTED";
   return (
     <div className="page">
       <PageHeader
@@ -25,12 +44,12 @@ export default async function AiProviderPage() {
         <div>
           <h2>{name}</h2>
           <p>
-            {provider?.status === "CONNECTED"
+            {connected
               ? "Connected · Used for diagnosis and repair"
-              : "Complete setup to connect a provider"}
+              : "Provider is not ready; automatic repair will not run"}
           </p>
         </div>
-        <span className="connected">
+        <span className={connected ? "connected" : "status-badge waiting"}>
           {provider?.status ?? "Not configured"}
         </span>
       </Card>
@@ -53,8 +72,9 @@ export default async function AiProviderPage() {
           </div>
         </dl>
         <small>
-          Secrets are never included in logs, incident evidence, or model
-          context.
+          Secrets are never returned by the API or shown in incident evidence.
+          Repository diffs and logs are treated as untrusted evidence before a
+          repair is proposed.
         </small>
       </Card>
       <div className="notice blue">
