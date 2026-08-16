@@ -33,7 +33,7 @@ For the two provider integrations, follow:
 - [GitHub App setup](docs/GITHUB_APP_SETUP.md)
 - [Vercel setup](docs/VERCEL_SETUP.md)
 
-When the console is served behind HTTPS, set `NOPAGER_COOKIE_SECURE=true`. Terminate TLS at a trusted reverse proxy and expose the **web** service. The default Compose configuration binds the Rust API to `127.0.0.1`; keep port 8080 private.
+The default Compose configuration binds **both** the web console and Rust API to `127.0.0.1`, so the first-admin bootstrap is not exposed to the network by default. For remote use, terminate TLS at a trusted reverse proxy and expose the web console deliberately; keep port 8080 private. Set `NOPAGER_WEB_BIND=0.0.0.0` only when your reverse-proxy/network topology requires a non-loopback host bind, and set `NOPAGER_COOKIE_SECURE=true` whenever the console is served through HTTPS.
 
 Local process checks remain available on the host at `http://127.0.0.1:8080/healthz` and `/readyz`.
 
