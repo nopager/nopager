@@ -5,7 +5,7 @@ services:
     environment:
       POSTGRES_DB: nopager
       POSTGRES_USER: nopager
-      POSTGRES_PASSWORD: nopager
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U nopager"]
       interval: 5s
@@ -26,7 +26,7 @@ services:
       - ALL
     environment:
       NOPAGER_SERVER_ADDR: 0.0.0.0:8080
-      DATABASE_URL: postgresql://nopager:nopager@postgres:5432/nopager
+      DATABASE_URL: postgresql://nopager:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/nopager
       NOPAGER_MASTER_KEY: ${NOPAGER_MASTER_KEY:?set NOPAGER_MASTER_KEY}
       NOPAGER_ADMIN_TOKEN: ${NOPAGER_ADMIN_TOKEN:-}
       NOPAGER_COOKIE_SECURE: ${NOPAGER_COOKIE_SECURE:-false}
@@ -56,7 +56,7 @@ services:
     cap_drop:
       - ALL
     environment:
-      DATABASE_URL: postgresql://nopager:nopager@postgres:5432/nopager
+      DATABASE_URL: postgresql://nopager:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/nopager
       NOPAGER_MASTER_KEY: ${NOPAGER_MASTER_KEY:?set NOPAGER_MASTER_KEY}
       NOPAGER_AI_PROVIDER: ${NOPAGER_AI_PROVIDER:-openai}
       NOPAGER_AI_MODEL: ${NOPAGER_AI_MODEL:-}
