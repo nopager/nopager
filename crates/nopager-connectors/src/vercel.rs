@@ -23,6 +23,8 @@ pub struct Deployment {
     #[serde(default)]
     pub target: Option<String>,
     #[serde(default)]
+    pub live: Option<bool>,
+    #[serde(default)]
     pub meta: serde_json::Value,
 }
 
@@ -78,12 +80,13 @@ impl VercelClient {
 
     pub async fn get_deployment(&self, id_or_url: &str) -> Result<Deployment, ConnectorError> {
         validate_id(id_or_url)?;
-        decode(
+        let deployment = decode(
             self.request(Method::GET, &format!("v13/deployments/{id_or_url}"))?
                 .send()
                 .await?,
         )
-        .await
+        .await?;
+        Ok(normalize_current_target(deployment))
     }
 
     pub async fn list_deployments(
@@ -167,6 +170,18 @@ impl VercelClient {
     }
 }
 
+fn normalize_current_target(mut deployment: Deployment) -> Deployment {
+    // `target=production` identifies the deployment environment. It does not mean
+    // the deployment is still the one serving production traffic. Vercel's v13
+    // deployment response exposes `live` for that distinction. Keeping a stale
+    // production target here would make rollback incorrectly skip a known-good
+    // deployment that is no longer live.
+    if deployment.target.as_deref() == Some("production") && deployment.live == Some(false) {
+        deployment.target = None;
+    }
+    deployment
+}
+
 fn validate_id(value: &str) -> Result<(), ConnectorError> {
     if value.is_empty() || value.contains('/') || value.contains('\\') || value.contains("..") {
         return Err(ConnectorError::InvalidConfiguration(
@@ -179,9 +194,39 @@ fn validate_id(value: &str) -> Result<(), ConnectorError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn deployment(target: Option<&str>, live: Option<bool>) -> Deployment {
+        Deployment {
+            id: "dpl_123".into(),
+            url: "example.vercel.app".into(),
+            ready_state: Some("READY".into()),
+            target: target.map(ToOwned::to_owned),
+            live,
+            meta: serde_json::Value::Null,
+        }
+    }
+
     #[test]
     fn rejects_path_in_identifier() {
         assert!(validate_id("prj_123").is_ok());
         assert!(validate_id("../../projects").is_err());
+    }
+
+    #[test]
+    fn stale_production_target_is_not_treated_as_current() {
+        let normalized = normalize_current_target(deployment(Some("production"), Some(false)));
+        assert_eq!(normalized.target, None);
+    }
+
+    #[test]
+    fn live_production_target_remains_current() {
+        let normalized = normalize_current_target(deployment(Some("production"), Some(true)));
+        assert_eq!(normalized.target.as_deref(), Some("production"));
+    }
+
+    #[test]
+    fn missing_live_signal_preserves_provider_target() {
+        let normalized = normalize_current_target(deployment(Some("production"), None));
+        assert_eq!(normalized.target.as_deref(), Some("production"));
     }
 }
