@@ -18,7 +18,7 @@ cd nopager
 sh scripts/quickstart.sh
 ```
 
-The bootstrap script creates `.env` when needed, generates a random 32-byte base64 `NOPAGER_MASTER_KEY`, detects the Docker socket group on Linux, builds the images, and starts PostgreSQL, API, Worker, and Web.
+The bootstrap script creates `.env` when needed, generates random 32-byte base64 `NOPAGER_MASTER_KEY` and `NOPAGER_ADMIN_TOKEN` values, detects the Docker socket group on Linux, builds the images, starts PostgreSQL/API/Worker/Web, and waits for the API plus web console to become ready.
 
 Then open:
 
@@ -36,6 +36,18 @@ For the two provider integrations, follow:
 The default Compose configuration binds **both** the web console and Rust API to `127.0.0.1`, so the first-admin bootstrap is not exposed to the network by default. For remote use, terminate TLS at a trusted reverse proxy and expose the web console deliberately; keep port 8080 private. Set `NOPAGER_WEB_BIND=0.0.0.0` only when your reverse-proxy/network topology requires a non-loopback host bind, and set `NOPAGER_COOKIE_SECURE=true` whenever the console is served through HTTPS.
 
 Local process checks remain available on the host at `http://127.0.0.1:8080/healthz` and `/readyz`.
+
+The CLI automatically reads `.env`, so operator commands work without manually exporting the generated token:
+
+```bash
+cargo run -p nopager-cli -- doctor
+cargo run -p nopager-cli -- status
+cargo run -p nopager-cli -- incidents
+cargo run -p nopager-cli -- pause
+cargo run -p nopager-cli -- resume
+```
+
+`pause` is the Kill Switch: it blocks mutation actions while monitoring remains active.
 
 ## Safety model
 
@@ -102,7 +114,7 @@ cargo run -p nopager-worker
 pnpm --filter @nopager/web dev
 ```
 
-Copy `.env.example` to `.env`; never commit the populated file. `nopager doctor` checks local dependencies, configuration, and API reachability.
+Copy `.env.example` to `.env`; never commit the populated file. `nopager doctor` checks Docker/Compose, local configuration, and API/PostgreSQL readiness.
 
 ## Dogfood demo
 
