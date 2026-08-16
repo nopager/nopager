@@ -1,7 +1,14 @@
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   postgres:
     image: postgres:17-alpine
     restart: unless-stopped
+    logging: *default-logging
     environment:
       POSTGRES_DB: nopager
       POSTGRES_USER: nopager
@@ -22,6 +29,9 @@ services:
       dockerfile: docker/server.Dockerfile
     restart: unless-stopped
     init: true
+    stop_signal: SIGINT
+    stop_grace_period: 30s
+    logging: *default-logging
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -48,6 +58,7 @@ services:
     image: alpine:3.22
     command: ["sh", "-c", "chown -R 10001:10001 /workspaces"]
     network_mode: none
+    logging: *default-logging
     volumes:
       - nopager-workspaces:/workspaces
 
@@ -57,6 +68,8 @@ services:
       dockerfile: docker/worker.Dockerfile
     restart: unless-stopped
     init: true
+    stop_grace_period: 30s
+    logging: *default-logging
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -100,6 +113,8 @@ services:
       dockerfile: docker/web.Dockerfile
     restart: unless-stopped
     init: true
+    stop_grace_period: 30s
+    logging: *default-logging
     security_opt:
       - no-new-privileges:true
     cap_drop:
