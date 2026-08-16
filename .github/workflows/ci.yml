@@ -72,6 +72,13 @@ jobs:
           test "$password" != "nopager"
           test "$(stat -c '%a' .env)" = "600"
           docker compose config --quiet
+      - name: Verify application container hardening
+        run: |
+          for service in server worker web; do
+            container=$(docker compose ps -q "$service")
+            test -n "$container"
+            test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$container")" = "true"
+          done
       - name: Verify Docker network isolation
         run: |
           docker compose exec -T web node - <<'NODE'
