@@ -297,6 +297,21 @@ async fn process_build_test(database: &Database, payload: &Value) -> anyhow::Res
     if attempt.incident_id != incident_id {
         anyhow::bail!("repair attempt does not belong to the incident");
     }
+    if work.protection_paused {
+        database
+            .transition_incident(IncidentTransition {
+                project_id: work.project_id,
+                incident_id,
+                expected: work.state,
+                next: IncidentState::Paused,
+                actor: "worker".into(),
+                message: "Protection paused before sandbox validation or repository mutation"
+                    .into(),
+                metadata: json!({}),
+            })
+            .await?;
+        return Ok(());
+    }
     if attempt.repair_branch.is_some() {
         database
             .enqueue(
@@ -393,6 +408,22 @@ async fn process_build_test(database: &Database, payload: &Value) -> anyhow::Res
     database
         .save_validation(attempt_id, &Value::Array(validation.clone()), true)
         .await?;
+
+    work = database.incident_work(incident_id).await?;
+    if work.protection_paused {
+        database
+            .transition_incident(IncidentTransition {
+                project_id: work.project_id,
+                incident_id,
+                expected: IncidentState::Testing,
+                next: IncidentState::Paused,
+                actor: "worker".into(),
+                message: "Protection paused before creating the repair pull request".into(),
+                metadata: json!({}),
+            })
+            .await?;
+        return Ok(());
+    }
 
     let files = proposal
         .changed_files
@@ -729,7 +760,20 @@ async fn process_production_action(database: &Database, payload: &Value) -> anyh
     let action = required_string(payload, "action")?;
     let work = database.incident_work(incident_id).await?;
     if work.protection_paused {
-        anyhow::bail!("production protection is paused");
+        if work.state != IncidentState::Paused {
+            database
+                .transition_incident(IncidentTransition {
+                    project_id: work.project_id,
+                    incident_id,
+                    expected: work.state,
+                    next: IncidentState::Paused,
+                    actor: "worker".into(),
+                    message: "Protection paused before production mutation".into(),
+                    metadata: json!({}),
+                })
+                .await?;
+        }
+        return Ok(());
     }
     let attempt = database.repair_attempt(attempt_id).await?;
     let vercel_project_id = work
