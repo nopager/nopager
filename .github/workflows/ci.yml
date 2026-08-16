@@ -33,136 +33,106 @@ jobs:
 
           db_path = Path("crates/nopager-db/src/lib.rs")
           db = db_path.read_text()
-          old_db = '''    pub async fn set_protection_paused(
-              &self,
-              paused: bool,
-              actor: &str,
-          ) -> Result<u64, DatabaseError> {
-              let mut tx = self.pool.begin().await?;
-              let project_ids = sqlx::query_scalar::<_, Uuid>("UPDATE projects SET protection_paused = $1, updated_at = now() WHERE status = 'ACTIVE' AND protection_paused <> $1 RETURNING id")
-                  .bind(paused).fetch_all(&mut *tx).await?;
-              for project_id in &project_ids {
-                  insert_audit_event(
-                      &mut tx,
-                      *project_id,
-                      None,
-                      actor,
-                      if paused {
-                          "protection.pause"
-                      } else {
-                          "protection.resume"
-                      },
-                      &project_id.to_string(),
-                      "success",
-                      &serde_json::json!({}),
-                  )
-                  .await?;
-              }
-              tx.commit().await?;
-              Ok(project_ids.len() as u64)
-          }
-          '''
-          new_db = '''    pub async fn set_protection_paused(
-              &self,
-              paused: bool,
-              actor: &str,
-          ) -> Result<u64, DatabaseError> {
-              let mut tx = self.pool.begin().await?;
-              let project_ids = sqlx::query_scalar::<_, Uuid>("UPDATE projects SET protection_paused = $1, updated_at = now() WHERE status = 'ACTIVE' AND protection_paused <> $1 RETURNING id")
-                  .bind(paused).fetch_all(&mut *tx).await?;
-              for project_id in &project_ids {
-                  insert_audit_event(
-                      &mut tx,
-                      *project_id,
-                      None,
-                      actor,
-                      if paused {
-                          "protection.pause"
-                      } else {
-                          "protection.resume"
-                      },
-                      &project_id.to_string(),
-                      "success",
-                      &serde_json::json!({}),
-                  )
-                  .await?;
-
-                  if !paused {
-                      let paused_incidents = sqlx::query_scalar::<_, Uuid>(
-                          "SELECT id FROM incidents WHERE project_id = $1 AND status = 'PAUSED' ORDER BY opened_at FOR UPDATE",
+          marker = "Protection resumed; restarting incident from fresh context"
+          if marker not in db:
+              start = db.index("    pub async fn set_protection_paused(")
+              end = db.index("    #[allow(clippy::too_many_arguments)]", start)
+              replacement = '''    pub async fn set_protection_paused(
+                  &self,
+                  paused: bool,
+                  actor: &str,
+              ) -> Result<u64, DatabaseError> {
+                  let mut tx = self.pool.begin().await?;
+                  let project_ids = sqlx::query_scalar::<_, Uuid>("UPDATE projects SET protection_paused = $1, updated_at = now() WHERE status = 'ACTIVE' AND protection_paused <> $1 RETURNING id")
+                      .bind(paused).fetch_all(&mut *tx).await?;
+                  for project_id in &project_ids {
+                      insert_audit_event(
+                          &mut tx,
+                          *project_id,
+                          None,
+                          actor,
+                          if paused {
+                              "protection.pause"
+                          } else {
+                              "protection.resume"
+                          },
+                          &project_id.to_string(),
+                          "success",
+                          &serde_json::json!({}),
                       )
-                      .bind(project_id)
-                      .fetch_all(&mut *tx)
                       .await?;
-                      for incident_id in paused_incidents {
-                          sqlx::query(
-                              "UPDATE repair_attempts SET status = 'PAUSED' WHERE id = (SELECT current_attempt_id FROM incidents WHERE id = $1)",
+
+                      if !paused {
+                          let paused_incidents = sqlx::query_scalar::<_, Uuid>(
+                              "SELECT id FROM incidents WHERE project_id = $1 AND status = 'PAUSED' ORDER BY opened_at FOR UPDATE",
                           )
-                          .bind(incident_id)
-                          .execute(&mut *tx)
+                          .bind(project_id)
+                          .fetch_all(&mut *tx)
                           .await?;
-                          let updated = sqlx::query(
-                              "UPDATE incidents SET status = 'COLLECTING_CONTEXT', current_attempt_id = NULL WHERE id = $1 AND status = 'PAUSED'",
-                          )
-                          .bind(incident_id)
-                          .execute(&mut *tx)
-                          .await?
-                          .rows_affected();
-                          if updated == 1 {
-                              insert_incident_event(
-                                  &mut tx,
-                                  incident_id,
-                                  "STATE_CHANGED",
-                                  actor,
-                                  "Protection resumed; restarting incident from fresh context",
-                                  &serde_json::json!({ "from": "PAUSED", "to": "COLLECTING_CONTEXT" }),
+                          for incident_id in paused_incidents {
+                              sqlx::query(
+                                  "UPDATE repair_attempts SET status = 'PAUSED' WHERE id = (SELECT current_attempt_id FROM incidents WHERE id = $1)",
                               )
+                              .bind(incident_id)
+                              .execute(&mut *tx)
                               .await?;
-                              insert_audit_event(
-                                  &mut tx,
-                                  *project_id,
-                                  Some(incident_id),
-                                  actor,
-                                  "incident.resume",
-                                  &incident_id.to_string(),
-                                  "success",
-                                  &serde_json::json!({ "restartFrom": "COLLECTING_CONTEXT" }),
+                              let updated = sqlx::query(
+                                  "UPDATE incidents SET status = 'COLLECTING_CONTEXT', current_attempt_id = NULL WHERE id = $1 AND status = 'PAUSED'",
                               )
-                              .await?;
-                              sqlx::query("INSERT INTO jobs (id, job_type, idempotency_key, correlation_id, payload_json, max_attempts) VALUES ($1, 'diagnose', $2, $3, $4, 3)")
-                                  .bind(Uuid::now_v7())
-                                  .bind(format!("incident:{incident_id}:resume-diagnose:{}", Uuid::now_v7()))
-                                  .bind(incident_id)
-                                  .bind(serde_json::json!({ "incidentId": incident_id }))
-                                  .execute(&mut *tx)
+                              .bind(incident_id)
+                              .execute(&mut *tx)
+                              .await?
+                              .rows_affected();
+                              if updated == 1 {
+                                  insert_incident_event(
+                                      &mut tx,
+                                      incident_id,
+                                      "STATE_CHANGED",
+                                      actor,
+                                      "Protection resumed; restarting incident from fresh context",
+                                      &serde_json::json!({ "from": "PAUSED", "to": "COLLECTING_CONTEXT" }),
+                                  )
                                   .await?;
+                                  insert_audit_event(
+                                      &mut tx,
+                                      *project_id,
+                                      Some(incident_id),
+                                      actor,
+                                      "incident.resume",
+                                      &incident_id.to_string(),
+                                      "success",
+                                      &serde_json::json!({ "restartFrom": "COLLECTING_CONTEXT" }),
+                                  )
+                                  .await?;
+                                  sqlx::query("INSERT INTO jobs (id, job_type, idempotency_key, correlation_id, payload_json, max_attempts) VALUES ($1, 'diagnose', $2, $3, $4, 3)")
+                                      .bind(Uuid::now_v7())
+                                      .bind(format!("incident:{incident_id}:resume-diagnose:{}", Uuid::now_v7()))
+                                      .bind(incident_id)
+                                      .bind(serde_json::json!({ "incidentId": incident_id }))
+                                      .execute(&mut *tx)
+                                      .await?;
+                              }
                           }
                       }
                   }
+                  tx.commit().await?;
+                  Ok(project_ids.len() as u64)
               }
-              tx.commit().await?;
-              Ok(project_ids.len() as u64)
-          }
+
           '''
-          if old_db in db:
-              db_path.write_text(db.replace(old_db, new_db, 1))
-          elif "Protection resumed; restarting incident from fresh context" not in db:
-              raise SystemExit("set_protection_paused block did not match")
+              db = db[:start] + replacement + db[end:]
+              db_path.write_text(db)
 
           worker_path = Path("apps/worker/src/main.rs")
           worker = worker_path.read_text()
-          old_start = '''    let mut work = database.incident_work(incident_id).await?;
-              let attempt = database.repair_attempt(attempt_id).await?;
-              if attempt.incident_id != incident_id {
+          if "Protection paused before sandbox validation or repository mutation" not in worker:
+              start = worker.index("async fn process_build_test(")
+              needle = '''    if attempt.incident_id != incident_id {
                   anyhow::bail!("repair attempt does not belong to the incident");
               }
           '''
-          new_start = '''    let mut work = database.incident_work(incident_id).await?;
-              let attempt = database.repair_attempt(attempt_id).await?;
-              if attempt.incident_id != incident_id {
-                  anyhow::bail!("repair attempt does not belong to the incident");
-              }
-              if work.protection_paused {
+              pos = worker.index(needle, start) + len(needle)
+              addition = '''    if work.protection_paused {
                   database
                       .transition_incident(IncidentTransition {
                           project_id: work.project_id,
@@ -177,21 +147,16 @@ jobs:
                   return Ok(());
               }
           '''
-          if old_start in worker:
-              worker = worker.replace(old_start, new_start, 1)
-          elif "Protection paused before sandbox validation or repository mutation" not in worker:
-              raise SystemExit("process_build_test start did not match")
+              worker = worker[:pos] + addition + worker[pos:]
 
-          old_before_pr = '''    database
+          if "Protection paused before creating the repair pull request" not in worker:
+              start = worker.index("async fn process_build_test(")
+              needle = '''    database
                   .save_validation(attempt_id, &Value::Array(validation.clone()), true)
                   .await?;
-
-              let files = proposal
           '''
-          new_before_pr = '''    database
-                  .save_validation(attempt_id, &Value::Array(validation.clone()), true)
-                  .await?;
-
+              pos = worker.index(needle, start) + len(needle)
+              addition = '''
               work = database.incident_work(incident_id).await?;
               if work.protection_paused {
                   database
@@ -207,21 +172,18 @@ jobs:
                       .await?;
                   return Ok(());
               }
-
-              let files = proposal
           '''
-          if old_before_pr in worker:
-              worker = worker.replace(old_before_pr, new_before_pr, 1)
-          elif "Protection paused before creating the repair pull request" not in worker:
-              raise SystemExit("pre-PR pause check did not match")
+              worker = worker[:pos] + addition + worker[pos:]
 
-          old_production = '''    let work = database.incident_work(incident_id).await?;
+          if "Protection paused before production mutation" not in worker:
+              start = worker.index("async fn process_production_action(")
+              old = '''    let work = database.incident_work(incident_id).await?;
               if work.protection_paused {
                   anyhow::bail!("production protection is paused");
               }
-              let attempt = database.repair_attempt(attempt_id).await?;
           '''
-          new_production = '''    let work = database.incident_work(incident_id).await?;
+              pos = worker.index(old, start)
+              new = '''    let work = database.incident_work(incident_id).await?;
               if work.protection_paused {
                   if work.state != IncidentState::Paused {
                       database
@@ -238,12 +200,8 @@ jobs:
                   }
                   return Ok(());
               }
-              let attempt = database.repair_attempt(attempt_id).await?;
           '''
-          if old_production in worker:
-              worker = worker.replace(old_production, new_production, 1)
-          elif "Protection paused before production mutation" not in worker:
-              raise SystemExit("production pause block did not match")
+              worker = worker[:pos] + new + worker[pos + len(old):]
 
           worker_path.write_text(worker)
           PY
