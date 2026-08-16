@@ -23,7 +23,10 @@ async function proxy(
   context: { params: Promise<{ path: string[] }> },
 ) {
   if (!sameOriginMutation(request)) {
-    return Response.json({ error: "cross_origin_mutation_blocked" }, { status: 403 });
+    return Response.json(
+      { error: "cross_origin_mutation_blocked" },
+      { status: 403 },
+    );
   }
 
   const { path } = await context.params;
