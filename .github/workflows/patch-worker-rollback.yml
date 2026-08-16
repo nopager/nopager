@@ -1,0 +1,51 @@
+name: One-shot rollback safety patch
+
+on:
+  push:
+    branches: [design-partner-alpha]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: design-partner-alpha
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          components: rustfmt
+      - name: Fix Vercel rollback currentness check
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("apps/worker/src/main.rs")
+          text = path.read_text()
+          old = '''            let current = vercel.get_deployment(&known_good_id).await?;
+            if current.target.as_deref() != Some("production") {
+                vercel.rollback(vercel_project_id, &known_good_id).await?;
+            }
+'''
+          new = '''            // A Vercel deployment target describes its environment, not whether it is
+            // currently serving the production domains. A previous known-good deployment
+            // can still report target=production, so always request the explicit rollback.
+            vercel.rollback(vercel_project_id, &known_good_id).await?;
+'''
+          count = text.count(old)
+          if count != 1:
+              raise SystemExit(f"expected exactly one rollback target check, found {count}")
+          path.write_text(text.replace(old, new))
+          PY
+          cargo fmt --all
+          git diff --check
+      - name: Commit patch and remove one-shot workflow
+        run: |
+          git config user.name "NoPager CI"
+          git config user.email "actions@users.noreply.github.com"
+          git add apps/worker/src/main.rs
+          git rm .github/workflows/patch-worker-rollback.yml
+          git commit -m "Fix Vercel rollback to known-good deployment"
+          git push origin HEAD:design-partner-alpha
