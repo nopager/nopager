@@ -1,0 +1,40 @@
+name: Remove dead setup helper
+
+on:
+  push:
+    branches: [directly-usable-alpha]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: directly-usable-alpha
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          components: rustfmt
+      - name: Remove unused connection_result helper
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('apps/server/src/main.rs')
+          text = path.read_text()
+          start = text.index('fn connection_result<')
+          end = text.index('fn connection_success()', start)
+          path.write_text(text[:start] + text[end:])
+          PY
+          cargo fmt --all
+          git diff --check
+      - name: Commit and remove one-shot workflow
+        run: |
+          git config user.name "NoPager CI"
+          git config user.email "actions@users.noreply.github.com"
+          git add apps/server/src/main.rs
+          git rm .github/workflows/remove-dead-setup-helper.yml
+          git commit -m "Remove dead setup connection helper"
+          git push origin HEAD:directly-usable-alpha
