@@ -49,15 +49,37 @@ else
   printf 'Warning: could not detect Docker socket group; keeping DOCKER_GID from .env.\n' >&2
 fi
 
-printf 'Building and starting NoPager...\n'
-docker compose up -d --build
-
 web_port=$(awk -F= '$1 == "NOPAGER_WEB_PORT" { print $2; exit }' .env)
 web_port=${web_port:-3000}
 api_port=$(awk -F= '$1 == "NOPAGER_API_PORT" { print $2; exit }' .env)
 api_port=${api_port:-8080}
 
-printf '\nNoPager is starting.\n'
+printf 'Building and starting NoPager...\n'
+docker compose up -d --build
+
+if command -v curl >/dev/null 2>&1; then
+  printf 'Waiting for API and web console readiness...\n'
+  ready=0
+  attempt=1
+  while [ "$attempt" -le 60 ]; do
+    if curl --fail --silent "http://127.0.0.1:${api_port}/healthz" >/dev/null 2>&1 \
+      && curl --fail --silent "http://127.0.0.1:${web_port}/api/nopager/setup/status" >/dev/null 2>&1; then
+      ready=1
+      break
+    fi
+    sleep 2
+    attempt=$((attempt + 1))
+  done
+  if [ "$ready" -ne 1 ]; then
+    docker compose ps >&2 || true
+    docker compose logs --no-color --tail=200 server worker web >&2 || true
+    fail "services did not become ready within 120 seconds."
+  fi
+else
+  printf 'Warning: curl is not installed, so endpoint readiness was not verified.\n' >&2
+fi
+
+printf '\nNoPager is ready.\n'
 printf 'Console: http://localhost:%s/setup\n' "$web_port"
 printf 'Local API health: http://127.0.0.1:%s/healthz\n' "$api_port"
 printf '\nNext: open the console and complete GitHub, Vercel, AI provider, and health-check setup.\n'
