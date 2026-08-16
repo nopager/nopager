@@ -841,10 +841,10 @@ async fn process_production_action(database: &Database, payload: &Value) -> anyh
                 .latest_known_good_deployment(work.project_id)
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("no known-good production deployment exists"))?;
-            let current = vercel.get_deployment(&known_good_id).await?;
-            if current.target.as_deref() != Some("production") {
-                vercel.rollback(vercel_project_id, &known_good_id).await?;
-            }
+            // The known-good record predates this repair promotion.
+            // Vercel target describes an environment, not current traffic.
+            // Always restore the recorded known-good deployment explicitly.
+            vercel.rollback(vercel_project_id, &known_good_id).await?;
             database
                 .record_audit_event(
                     work.project_id,
