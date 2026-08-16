@@ -1,0 +1,77 @@
+name: Require ready Vercel rollback baseline
+
+on:
+  push:
+    branches: [directly-usable-alpha]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: directly-usable-alpha
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          components: rustfmt
+      - name: Require READY production deployment during setup
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('apps/server/src/main.rs')
+          text = path.read_text()
+
+          old = '''                    Ok(deployments)
+                        if deployments
+                            .iter()
+                            .any(|deployment| deployment.target.as_deref() == Some("production")) =>
+                    {
+          '''
+          new = '''                    Ok(deployments)
+                        if deployments.iter().any(vercel_production_is_ready) =>
+                    {
+          '''
+          if old not in text:
+              raise SystemExit('Vercel connection-test production predicate not found')
+          text = text.replace(old, new, 1)
+
+          old = '''        .find(|deployment| deployment.target.as_deref() == Some("production"))
+          '''
+          new = '''        .find(vercel_production_is_ready)
+          '''
+          if old not in text:
+              raise SystemExit('initial deployment predicate not found')
+          text = text.replace(old, new, 1)
+
+          marker = '''fn optional_nonempty(value: &str) -> Option<String> {
+          '''
+          helper = '''fn vercel_production_is_ready(deployment: &nopager_connectors::vercel::Deployment) -> bool {
+              deployment.target.as_deref() == Some("production")
+                  && matches!(
+                      deployment.ready_state.as_deref().or(deployment.state.as_deref()),
+                      Some("READY")
+                  )
+          }
+
+          '''
+          if 'fn vercel_production_is_ready(' not in text:
+              if marker not in text:
+                  raise SystemExit('optional_nonempty marker not found')
+              text = text.replace(marker, helper + marker, 1)
+
+          path.write_text(text)
+          PY
+          cargo fmt --all
+          git diff --check
+      - name: Commit and remove one-shot workflow
+        run: |
+          git config user.name "NoPager CI"
+          git config user.email "actions@users.noreply.github.com"
+          git add apps/server/src/main.rs
+          git rm .github/workflows/require-ready-known-good.yml
+          git commit -m "Require READY Vercel deployment for rollback baseline"
+          git push origin HEAD:directly-usable-alpha
