@@ -233,7 +233,8 @@ function incidentOutcome(incident: IncidentDetail) {
         headline: "Production mutations are paused.",
         message:
           "NoPager will keep read-only monitoring and evidence collection active while mutation actions remain blocked.",
-        nextStep: "Resume protection only after the production risk is understood.",
+        nextStep:
+          "Resume protection only after the production risk is understood.",
       };
     case "FAILED":
     case "ESCALATED":
