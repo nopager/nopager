@@ -1,14 +1,37 @@
 import { describe, expect, it } from "vitest";
-import { maskSecret, projectIncidentState } from "./model";
+import {
+  maskSecret,
+  projectIncidentState,
+  type InternalIncidentState,
+  type UiIncidentState,
+} from "./model";
+
+const stateCases: Array<[InternalIncidentState, UiIncidentState]> = [
+  ["OPEN", "OPEN"],
+  ["COLLECTING_CONTEXT", "OPEN"],
+  ["DIAGNOSING", "DIAGNOSING"],
+  ["PLANNING", "DIAGNOSING"],
+  ["REPAIRING", "REPAIRING"],
+  ["TESTING", "REPAIRING"],
+  ["PREVIEW_DEPLOYING", "REPAIRING"],
+  ["VERIFYING_PREVIEW", "REPAIRING"],
+  ["WAITING_APPROVAL", "WAITING_APPROVAL"],
+  ["PRODUCTION_DEPLOYING", "REPAIRING"],
+  ["VERIFYING_PRODUCTION", "REPAIRING"],
+  ["ROLLING_BACK", "REPAIRING"],
+  ["ROLLED_BACK", "RESOLVED"],
+  ["RESOLVED", "RESOLVED"],
+  ["FAILED", "HUMAN_NEEDED"],
+  ["ESCALATED", "HUMAN_NEEDED"],
+  ["CANCELLED", "RESOLVED"],
+  ["IGNORED", "RESOLVED"],
+  ["DUPLICATE", "RESOLVED"],
+  ["PAUSED", "PAUSED"],
+];
 
 describe("UI state projection", () => {
-  it("collapses technical repair states", () => {
-    expect(projectIncidentState("PREVIEW_VERIFYING")).toBe("REPAIRING");
-    expect(projectIncidentState("ROLLING_BACK")).toBe("REPAIRING");
-  });
-
-  it("surfaces escalation as human needed", () => {
-    expect(projectIncidentState("ESCALATED")).toBe("HUMAN_NEEDED");
+  it.each(stateCases)("projects %s to %s", (internal, expected) => {
+    expect(projectIncidentState(internal)).toBe(expected);
   });
 });
 

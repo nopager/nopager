@@ -1032,6 +1032,59 @@ impl Database {
                 &serde_json::json!({}),
             )
             .await?;
+
+            if !paused {
+                let paused_incidents = sqlx::query_scalar::<_, Uuid>(
+                    "SELECT id FROM incidents WHERE project_id = $1 AND status = 'PAUSED' ORDER BY opened_at FOR UPDATE",
+                )
+                .bind(project_id)
+                .fetch_all(&mut *tx)
+                .await?;
+                for incident_id in paused_incidents {
+                    sqlx::query(
+                        "UPDATE repair_attempts SET status = 'PAUSED' WHERE id = (SELECT current_attempt_id FROM incidents WHERE id = $1)",
+                    )
+                    .bind(incident_id)
+                    .execute(&mut *tx)
+                    .await?;
+                    let updated = sqlx::query(
+                        "UPDATE incidents SET status = 'COLLECTING_CONTEXT', current_attempt_id = NULL WHERE id = $1 AND status = 'PAUSED'",
+                    )
+                    .bind(incident_id)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected();
+                    if updated == 1 {
+                        insert_incident_event(
+                            &mut tx,
+                            incident_id,
+                            "STATE_CHANGED",
+                            actor,
+                            "Protection resumed; restarting incident from fresh context",
+                            &serde_json::json!({ "from": "PAUSED", "to": "COLLECTING_CONTEXT" }),
+                        )
+                        .await?;
+                        insert_audit_event(
+                            &mut tx,
+                            *project_id,
+                            Some(incident_id),
+                            actor,
+                            "incident.resume",
+                            &incident_id.to_string(),
+                            "success",
+                            &serde_json::json!({ "restartFrom": "COLLECTING_CONTEXT" }),
+                        )
+                        .await?;
+                        sqlx::query("INSERT INTO jobs (id, job_type, idempotency_key, correlation_id, payload_json, max_attempts) VALUES ($1, 'diagnose', $2, $3, $4, 3)")
+                            .bind(Uuid::now_v7())
+                            .bind(format!("incident:{incident_id}:resume-diagnose:{}", Uuid::now_v7()))
+                            .bind(incident_id)
+                            .bind(serde_json::json!({ "incidentId": incident_id }))
+                            .execute(&mut *tx)
+                            .await?;
+                    }
+                }
+            }
         }
         tx.commit().await?;
         Ok(project_ids.len() as u64)

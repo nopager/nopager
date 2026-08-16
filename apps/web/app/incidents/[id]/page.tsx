@@ -37,6 +37,8 @@ export default async function IncidentDetailPage({
     ) ??
     incident.rootCauseSummary ??
     "No root-cause summary is available yet.";
+  const outcome = incidentOutcome(incident);
+
   return (
     <div className="page">
       <Link href="/incidents" className="back-link">
@@ -45,10 +47,7 @@ export default async function IncidentDetailPage({
       <PageHeader
         eyebrow={incident.id}
         title={incident.title}
-        description={
-          incident.rootCauseSummary ??
-          "NoPager is working through the incident lifecycle."
-        }
+        description={outcome.headline}
         action={<StatusBadge state={projectIncidentState(incident.status)} />}
       />
       {incident.status === "WAITING_APPROVAL" && (
@@ -64,6 +63,11 @@ export default async function IncidentDetailPage({
           <ApproveButton incidentId={incident.id} />
         </div>
       )}
+      <Card>
+        <SectionTitle title="Current outcome" detail={outcome.label} />
+        <p className="result-copy">{outcome.message}</p>
+        <p className="muted">{outcome.nextStep}</p>
+      </Card>
       <div className="detail-grid">
         <div className="detail-main">
           <Card>
@@ -164,6 +168,119 @@ export default async function IncidentDetailPage({
       </div>
     </div>
   );
+}
+
+function incidentOutcome(incident: IncidentDetail) {
+  switch (incident.status) {
+    case "RESOLVED":
+      return {
+        label: incident.autonomousResolution
+          ? "Resolved autonomously"
+          : "Resolved",
+        headline: "Production is healthy again.",
+        message:
+          incident.rootCauseSummary ??
+          "NoPager completed the repair and production verification.",
+        nextStep: "No action needed. The incident remains available for audit.",
+      };
+    case "ROLLED_BACK":
+      return {
+        label: "Rolled back safely",
+        headline: "The previous known-good deployment was restored.",
+        message:
+          incident.rootCauseSummary ??
+          "NoPager restored the previous known-good production deployment.",
+        nextStep: "No action needed. The incident remains available for audit.",
+      };
+    case "WAITING_APPROVAL":
+      return {
+        label: "Ready for production approval",
+        headline: "The repair is verified and waiting for you.",
+        message:
+          "NoPager diagnosed the incident, prepared a repair, passed sandbox validation, and verified the Vercel Preview.",
+        nextStep:
+          "Review the root cause, patch, tests, and Preview below, then approve or reject the production promotion.",
+      };
+    case "VERIFYING_PREVIEW":
+      return {
+        label: "Preview verification",
+        headline: "The repair is being verified before production can change.",
+        message:
+          "NoPager is checking the Vercel Preview and its health endpoint. Production remains untouched until this gate passes.",
+        nextStep: "No action needed while Preview verification is running.",
+      };
+    case "PRODUCTION_DEPLOYING":
+    case "VERIFYING_PRODUCTION":
+      return {
+        label: "Production verification",
+        headline: "The verified repair is being checked in production.",
+        message:
+          "NoPager is watching the production health signal before declaring the incident resolved.",
+        nextStep: "No action needed unless production verification fails.",
+      };
+    case "ROLLING_BACK":
+      return {
+        label: "Rollback in progress",
+        headline: "Production verification failed. NoPager is rolling back.",
+        message:
+          "The repair did not satisfy the production safety gate, so the previous known-good deployment is being restored.",
+        nextStep:
+          "No new repair will be trusted until rollback verification completes.",
+      };
+    case "PAUSED":
+      return {
+        label: "Protection paused",
+        headline: "Production mutations are paused.",
+        message:
+          "NoPager will keep read-only monitoring and evidence collection active while mutation actions remain blocked.",
+        nextStep:
+          "Resume protection only after the production risk is understood.",
+      };
+    case "FAILED":
+    case "ESCALATED":
+      return {
+        label: "Human action required",
+        headline: "NoPager stopped before making an unsafe change.",
+        message:
+          incident.rootCauseSummary ??
+          "The automated repair path could not be verified safely.",
+        nextStep:
+          "Review the evidence and failed attempt below. Production mutations remain stopped until the incident is handled.",
+      };
+    case "CANCELLED":
+      return {
+        label: "Repair rejected",
+        headline: "The proposed production change was not applied.",
+        message:
+          "The incident was closed without promoting the repair to production.",
+        nextStep: "Production remains on the previously approved deployment.",
+      };
+    case "IGNORED":
+      return {
+        label: "No production action required",
+        headline: "This incident was intentionally ignored.",
+        message: "No production mutation is scheduled from this incident.",
+        nextStep: "No action needed unless the incident should be reopened.",
+      };
+    case "DUPLICATE":
+      return {
+        label: "Duplicate incident",
+        headline: "This signal belongs to an existing incident.",
+        message:
+          "NoPager linked the signal to the existing incident instead of starting duplicate remediation.",
+        nextStep: "Review the active incident for the current repair status.",
+      };
+    default:
+      return {
+        label: "NoPager is working",
+        headline: "NoPager is working through the incident lifecycle.",
+        message:
+          incident.rootCauseSummary ??
+          "NoPager is collecting evidence, diagnosing the issue, and preparing the smallest reversible repair.",
+        nextStep:
+          "No action needed unless the incident is escalated or requests approval.",
+      };
+  }
 }
 
 function stringValue(
