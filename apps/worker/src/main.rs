@@ -42,6 +42,9 @@ async fn main() -> anyhow::Result<()> {
                 if let Err(error) = database.enqueue_due_health_checks(100).await {
                     error!(%error, "failed to schedule health checks");
                 }
+        if let Err(error) = database.enqueue_due_vercel_polls(100).await {
+            error!(%error, "failed to schedule Vercel polling fallback");
+        }
             }
             () = tokio::time::sleep(Duration::from_millis(750)) => {
                 if let Some(job) = database.claim_next(&worker_id).await? {
@@ -72,6 +75,7 @@ async fn execute_job(database: &Database, job: &Job) -> anyhow::Result<()> {
     info!(job_id = %job.id, job_type = %job.job_type, attempt = job.attempt, "executing job");
     match job.job_type.as_str() {
         "health-check" => process_health_check(database, &job.payload_json).await,
+        "vercel-poll" => process_vercel_poll(database, &job.payload_json).await,
         "webhook-process" => process_webhook(database, &job.payload_json).await,
         "incident-context" => process_incident_context(database, &job.payload_json).await,
         "diagnose" => process_diagnosis(database, &job.payload_json).await,
@@ -837,10 +841,10 @@ async fn process_production_action(database: &Database, payload: &Value) -> anyh
                 .latest_known_good_deployment(work.project_id)
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("no known-good production deployment exists"))?;
-            let current = vercel.get_deployment(&known_good_id).await?;
-            if current.target.as_deref() != Some("production") {
-                vercel.rollback(vercel_project_id, &known_good_id).await?;
-            }
+            // The known-good record predates this repair promotion.
+            // Vercel target describes an environment, not current traffic.
+            // Always restore the recorded known-good deployment explicitly.
+            vercel.rollback(vercel_project_id, &known_good_id).await?;
             database
                 .record_audit_event(
                     work.project_id,
@@ -1477,6 +1481,83 @@ async fn process_health_check(database: &Database, payload: &Value) -> anyhow::R
     database
         .record_health_observation(&check, observation.success, &metadata)
         .await?;
+    Ok(())
+}
+
+async fn process_vercel_poll(database: &Database, payload: &Value) -> anyhow::Result<()> {
+    let project_id: uuid::Uuid = required_string(payload, "projectId")?.parse()?;
+    let vercel_project_id = required_string(payload, "vercelProjectId")?;
+    let since_ms = payload
+        .get("sinceMs")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| anyhow::anyhow!("sinceMs is missing"))?;
+    let integration = database.integration_secret(project_id, "vercel").await?;
+    let credentials = decrypt_credentials(&integration.encrypted_credentials)?;
+    let token = required_string(&credentials, "token")?;
+    let team_id = integration
+        .metadata
+        .get("teamId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let client = VercelClient::new(SecretString::from(token.to_owned()), team_id)?;
+    let deployments = client
+        .list_deployments_since(vercel_project_id, 20, Some(since_ms))
+        .await?;
+
+    for deployment in deployments {
+        if deployment.target.as_deref() != Some("production") {
+            continue;
+        }
+        let state = deployment
+            .ready_state
+            .as_deref()
+            .or(deployment.state.as_deref())
+            .unwrap_or("UNKNOWN")
+            .to_owned();
+        let url = https_url(&deployment.url);
+        let sha = deployment
+            .meta
+            .get("githubCommitSha")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned();
+        database
+            .save_deployment(
+                project_id,
+                &deployment.id,
+                "production",
+                &sha,
+                &url,
+                &state,
+                false,
+            )
+            .await?;
+
+        if matches!(state.as_str(), "ERROR" | "CANCELED" | "CANCELLED") {
+            database
+                .open_incident(&IncidentTrigger {
+                    project_id,
+                    deduplication_key: format!("vercel-deployment:{}", deployment.id),
+                    trigger_type: "VERCEL_DEPLOYMENT_FAILED".into(),
+                    severity: "high".into(),
+                    title: "Vercel production deployment failed".into(),
+                    metadata: json!({
+                        "source": "vercel-poll",
+                        "deployment": {
+                            "id": deployment.id,
+                            "url": url,
+                            "target": deployment.target,
+                            "state": state,
+                            "created": deployment.created,
+                            "meta": deployment.meta
+                        }
+                    }),
+                })
+                .await?;
+        }
+    }
     Ok(())
 }
 

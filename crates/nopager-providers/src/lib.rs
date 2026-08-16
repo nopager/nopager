@@ -6,6 +6,8 @@ use thiserror::Error;
 mod http;
 pub use http::{AnthropicProvider, GeminiProvider, OpenAiProvider};
 
+pub const VERIFIED_GITHUB_DIFF_SOURCE: &str = "verified_github_diff";
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiagnosisInput {
@@ -64,6 +66,13 @@ impl DiagnosisResult {
         }
         Ok(())
     }
+
+    #[must_use]
+    pub fn has_verified_source_context(&self) -> bool {
+        self.evidence.iter().any(|evidence| {
+            evidence.source == VERIFIED_GITHUB_DIFF_SOURCE && !evidence.finding.trim().is_empty()
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,7 +116,7 @@ impl RepairProposal {
             return Err(OutputValidationError::InvalidPatch);
         }
         for path in &self.changed_files {
-            validate_relative_path(path)?;
+            validate_repair_path(path)?;
         }
         if self.validation_commands.is_empty() {
             return Err(OutputValidationError::MissingSafetyPlan);
@@ -143,6 +152,45 @@ fn validate_relative_path(path: &str) -> Result<(), OutputValidationError> {
     Ok(())
 }
 
+fn validate_repair_path(path: &str) -> Result<(), OutputValidationError> {
+    validate_relative_path(path)?;
+    let normalized = path.replace('\\', "/").to_ascii_lowercase();
+    let file_name = normalized.rsplit('/').next().unwrap_or(&normalized);
+    let sensitive_component = normalized.split('/').any(|component| {
+        component == ".env"
+            || component.starts_with(".env.")
+            || component == "migrations"
+            || component == "terraform"
+            || component == "k8s"
+            || component == "kubernetes"
+            || component == "helm"
+            || component == "charts"
+            || component == "infra"
+    });
+    let sensitive_file = matches!(
+        file_name,
+        "package.json"
+            | "package-lock.json"
+            | "pnpm-lock.yaml"
+            | "yarn.lock"
+            | "cargo.toml"
+            | "cargo.lock"
+            | "vercel.json"
+            | "docker-compose.yml"
+            | "docker-compose.yaml"
+            | "compose.yml"
+            | "compose.yaml"
+    ) || file_name == "dockerfile"
+        || file_name.starts_with("dockerfile.")
+        || file_name.ends_with(".tf")
+        || file_name.ends_with(".tfvars")
+        || normalized.starts_with(".github/workflows/");
+    if sensitive_component || sensitive_file {
+        return Err(OutputValidationError::SensitiveRepairPath(path.to_owned()));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum OutputValidationError {
     #[error("model output omitted the root cause")]
@@ -153,6 +201,8 @@ pub enum OutputValidationError {
     InvalidConfidence,
     #[error("model output contains an unsafe path: {0}")]
     UnsafePath(String),
+    #[error("model attempted to repair a sensitive infrastructure or dependency path: {0}")]
+    SensitiveRepairPath(String),
     #[error("model output omitted validation or rollback planning")]
     MissingSafetyPlan,
     #[error("model patch is empty, too large, or has no changed files")]
@@ -165,6 +215,8 @@ pub enum ProviderError {
     Authentication,
     #[error("model provider request failed: {0}")]
     Request(String),
+    #[error("verified source context is unavailable; refusing to invent a repair patch")]
+    InsufficientSourceContext,
     #[error("model provider returned invalid structured output: {0}")]
     InvalidOutput(#[from] OutputValidationError),
     #[error("model provider response could not be decoded")]
@@ -191,6 +243,18 @@ mod tests {
         }
     }
 
+    fn valid_repair(path: &str) -> RepairProposal {
+        RepairProposal {
+            unified_diff: format!("--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-old\n+new"),
+            changed_files: vec![path.to_owned()],
+            explanation: "repair regression".to_owned(),
+            validation_commands: vec![ControlledCommand {
+                program: "npm".to_owned(),
+                arguments: vec!["test".to_owned()],
+            }],
+        }
+    }
+
     #[test]
     fn accepts_complete_structured_diagnosis() {
         assert_eq!(valid_diagnosis().validate(), Ok(()));
@@ -214,5 +278,39 @@ mod tests {
             diagnosis.validate(),
             Err(OutputValidationError::InvalidConfidence)
         );
+    }
+
+    #[test]
+    fn recognizes_only_explicit_verified_source_evidence() {
+        let mut diagnosis = valid_diagnosis();
+        assert!(!diagnosis.has_verified_source_context());
+        diagnosis.evidence.push(Evidence {
+            source: VERIFIED_GITHUB_DIFF_SOURCE.to_owned(),
+            finding: "FILE: src/checkout.rs\n@@ -1 +1 @@".to_owned(),
+        });
+        assert!(diagnosis.has_verified_source_context());
+    }
+
+    #[test]
+    fn permits_normal_application_code_repairs() {
+        assert_eq!(valid_repair("src/login.ts").validate(), Ok(()));
+    }
+
+    #[test]
+    fn blocks_sensitive_automatic_repair_paths() {
+        for path in [
+            ".github/workflows/deploy.yml",
+            ".env.production",
+            "prisma/migrations/001.sql",
+            "infra/main.tf",
+            "vercel.json",
+            "Dockerfile",
+            "package.json",
+        ] {
+            assert!(matches!(
+                valid_repair(path).validate(),
+                Err(OutputValidationError::SensitiveRepairPath(_))
+            ));
+        }
     }
 }

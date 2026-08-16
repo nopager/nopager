@@ -1,6 +1,7 @@
 services:
   postgres:
     image: postgres:17-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: nopager
       POSTGRES_USER: nopager
@@ -17,6 +18,12 @@ services:
     build:
       context: .
       dockerfile: docker/server.Dockerfile
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     environment:
       NOPAGER_SERVER_ADDR: 0.0.0.0:8080
       DATABASE_URL: postgresql://nopager:nopager@postgres:5432/nopager
@@ -27,7 +34,7 @@ services:
       VERCEL_WEBHOOK_SECRET: ${VERCEL_WEBHOOK_SECRET:-}
       RUST_LOG: ${RUST_LOG:-info}
     ports:
-      - "8080:8080"
+      - "127.0.0.1:${NOPAGER_API_PORT:-8080}:8080"
     depends_on:
       postgres:
         condition: service_healthy
@@ -42,6 +49,12 @@ services:
     build:
       context: .
       dockerfile: docker/worker.Dockerfile
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     environment:
       DATABASE_URL: postgresql://nopager:nopager@postgres:5432/nopager
       NOPAGER_MASTER_KEY: ${NOPAGER_MASTER_KEY:?set NOPAGER_MASTER_KEY}
@@ -57,7 +70,7 @@ services:
       VERCEL_TEAM_ID: ${VERCEL_TEAM_ID:-}
       NOPAGER_WORK_ROOT: /workspaces
       NOPAGER_SANDBOX_VOLUME: nopager-workspaces
-      SANDBOX_UID_GID: 10001:10001
+      SANDBOX_UID_GID: ${SANDBOX_UID_GID:-10001:10001}
       SANDBOX_MAX_CPU: ${SANDBOX_MAX_CPU:-2}
       SANDBOX_MAX_MEMORY_MB: ${SANDBOX_MAX_MEMORY_MB:-4096}
       SANDBOX_TIMEOUT_SECONDS: ${SANDBOX_TIMEOUT_SECONDS:-900}
@@ -77,10 +90,16 @@ services:
     build:
       context: .
       dockerfile: docker/web.Dockerfile
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     environment:
       NOPAGER_API_URL: http://server:8080
     ports:
-      - "3000:3000"
+      - "${NOPAGER_WEB_BIND:-127.0.0.1}:${NOPAGER_WEB_PORT:-3000}:3000"
     depends_on:
       - server
 

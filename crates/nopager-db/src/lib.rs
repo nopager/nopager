@@ -373,6 +373,40 @@ impl Database {
         Ok(checks.len() as u64)
     }
 
+    pub async fn enqueue_due_vercel_polls(&self, limit: i64) -> Result<u64, DatabaseError> {
+        let targets = sqlx::query_as::<_, (Uuid, String, OffsetDateTime)>(
+            "SELECT i.project_id, i.external_project_id, i.created_at
+         FROM integrations i
+         JOIN projects p ON p.id = i.project_id
+         WHERE i.type = 'vercel'
+           AND i.status = 'CONNECTED'
+           AND i.external_project_id IS NOT NULL
+           AND p.status = 'ACTIVE'
+         ORDER BY i.created_at
+         LIMIT $1",
+        )
+        .bind(limit.clamp(1, 1000))
+        .fetch_all(&self.pool)
+        .await?;
+        let bucket = OffsetDateTime::now_utc().unix_timestamp() / 30;
+        for (project_id, external_project_id, connected_at) in &targets {
+            let since_ms = connected_at.unix_timestamp().saturating_mul(1000);
+            self.enqueue(
+                JobType::VercelPoll,
+                &format!("vercel-poll:{project_id}:{bucket}"),
+                None,
+                &serde_json::json!({
+                    "projectId": project_id,
+                    "vercelProjectId": external_project_id,
+                    "sinceMs": since_ms
+                }),
+                3,
+            )
+            .await?;
+        }
+        Ok(targets.len() as u64)
+    }
+
     pub async fn health_check(&self, id: Uuid) -> Result<HealthCheck, DatabaseError> {
         Ok(sqlx::query_as::<_, HealthCheck>(
             "SELECT id, project_id, url, timeout_ms, expected_status FROM health_checks WHERE id = $1",
@@ -1270,6 +1304,7 @@ async fn insert_audit_event(
 #[serde(rename_all = "kebab-case")]
 pub enum JobType {
     HealthCheck,
+    VercelPoll,
     WebhookProcess,
     IncidentContext,
     Diagnose,
@@ -1286,6 +1321,7 @@ impl JobType {
     const fn as_str(self) -> &'static str {
         match self {
             Self::HealthCheck => "health-check",
+            Self::VercelPoll => "vercel-poll",
             Self::WebhookProcess => "webhook-process",
             Self::IncidentContext => "incident-context",
             Self::Diagnose => "diagnose",

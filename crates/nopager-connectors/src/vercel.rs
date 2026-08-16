@@ -21,6 +21,10 @@ pub struct Deployment {
     #[serde(default)]
     pub ready_state: Option<String>,
     #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub created: Option<i64>,
+    #[serde(default)]
     pub target: Option<String>,
     #[serde(default)]
     pub live: Option<bool>,
@@ -31,6 +35,12 @@ pub struct Deployment {
 #[derive(Debug, Deserialize)]
 pub struct DeploymentList {
     pub deployments: Vec<Deployment>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProjectDetails {
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -53,7 +63,7 @@ impl VercelClient {
         Ok(Self {
             http: Client::new(),
             token,
-            team_id,
+            team_id: team_id.filter(|value| !value.trim().is_empty()),
             api_base: Url::parse("https://api.vercel.com/").expect("constant URL"),
         })
     }
@@ -78,6 +88,16 @@ impl VercelClient {
         Ok(request)
     }
 
+    pub async fn get_project(&self, id_or_name: &str) -> Result<ProjectDetails, ConnectorError> {
+        validate_id(id_or_name)?;
+        decode(
+            self.request(Method::GET, &format!("v9/projects/{id_or_name}"))?
+                .send()
+                .await?,
+        )
+        .await
+    }
+
     pub async fn get_deployment(&self, id_or_url: &str) -> Result<Deployment, ConnectorError> {
         validate_id(id_or_url)?;
         let deployment = decode(
@@ -94,15 +114,25 @@ impl VercelClient {
         project_id: &str,
         limit: u8,
     ) -> Result<Vec<Deployment>, ConnectorError> {
+        self.list_deployments_since(project_id, limit, None).await
+    }
+
+    pub async fn list_deployments_since(
+        &self,
+        project_id: &str,
+        limit: u8,
+        since_ms: Option<i64>,
+    ) -> Result<Vec<Deployment>, ConnectorError> {
         validate_id(project_id)?;
-        let response = self
+        let limit = limit.min(100).to_string();
+        let mut request = self
             .request(Method::GET, "v6/deployments")?
-            .query(&[
-                ("projectId", project_id),
-                ("limit", &limit.min(100).to_string()),
-            ])
-            .send()
-            .await?;
+            .query(&[("projectId", project_id), ("limit", limit.as_str())]);
+        if let Some(since_ms) = since_ms {
+            let since = since_ms.to_string();
+            request = request.query(&[("since", since.as_str())]);
+        }
+        let response = request.send().await?;
         Ok(decode::<DeploymentList>(response).await?.deployments)
     }
 
@@ -200,6 +230,8 @@ mod tests {
             id: "dpl_123".into(),
             url: "example.vercel.app".into(),
             ready_state: Some("READY".into()),
+            state: None,
+            created: None,
             target: target.map(ToOwned::to_owned),
             live,
             meta: serde_json::Value::Null,
@@ -209,7 +241,15 @@ mod tests {
     #[test]
     fn rejects_path_in_identifier() {
         assert!(validate_id("prj_123").is_ok());
+        assert!(validate_id("my-project").is_ok());
         assert!(validate_id("../../projects").is_err());
+    }
+
+    #[test]
+    fn empty_team_scope_is_treated_as_personal_account() {
+        let client = VercelClient::new(SecretString::from("token".to_owned()), Some("   ".into()))
+            .expect("valid client");
+        assert!(client.team_id.is_none());
     }
 
     #[test]

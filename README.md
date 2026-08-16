@@ -15,34 +15,47 @@ Requirements: Docker Engine 26 or newer with Compose v2 and a public HTTPS produ
 ```bash
 git clone https://github.com/nopager/nopager.git
 cd nopager
-cp .env.example .env
+sh scripts/quickstart.sh
 ```
 
-Generate a 32-byte base64 master key and place it in `.env` as `NOPAGER_MASTER_KEY`. The Rust CLI can do this without overwriting an existing file:
+The bootstrap script creates `.env` when needed, generates random 32-byte base64 `NOPAGER_MASTER_KEY` and `NOPAGER_ADMIN_TOKEN` values, detects the Docker socket group on Linux, builds the images, starts PostgreSQL/API/Worker/Web, and waits for the API plus web console to become ready.
+
+Then open:
+
+```text
+http://localhost:3000/setup
+```
+
+The setup wizard creates the local administrator and validates GitHub, Vercel, the model provider, the production health URL, and the selected safety mode before it stores the protected app. GitHub repository ID/default branch and the canonical Vercel project metadata are discovered automatically.
+
+For the two provider integrations, follow:
+
+- [GitHub App setup](docs/GITHUB_APP_SETUP.md)
+- [Vercel setup](docs/VERCEL_SETUP.md)
+
+The default Compose configuration binds **both** the web console and Rust API to `127.0.0.1`, so the first-admin bootstrap is not exposed to the network by default. For remote use, terminate TLS at a trusted reverse proxy and expose the web console deliberately; keep port 8080 private. Set `NOPAGER_WEB_BIND=0.0.0.0` only when your reverse-proxy/network topology requires a non-loopback host bind, and set `NOPAGER_COOKIE_SECURE=true` whenever the console is served through HTTPS.
+
+Local process checks remain available on the host at `http://127.0.0.1:8080/healthz` and `/readyz`.
+
+The CLI automatically reads `.env`, so operator commands work without manually exporting the generated token:
 
 ```bash
-cargo run -p nopager-cli -- init
+cargo run -p nopager-cli -- doctor
+cargo run -p nopager-cli -- status
+cargo run -p nopager-cli -- incidents
+cargo run -p nopager-cli -- pause
+cargo run -p nopager-cli -- resume
 ```
 
-Then start the stack:
-
-```bash
-docker compose up -d --build
-```
-
-On Linux, set `DOCKER_GID` in `.env` to the group ID that owns `/var/run/docker.sock` so the non-root Worker can reach the daemon.
-
-Open [http://localhost:3000/setup](http://localhost:3000/setup). The wizard creates the local administrator and connects GitHub, Vercel, the model provider, the production health URL, and Safe Mode. Credentials entered in setup are encrypted with XChaCha20-Poly1305 before PostgreSQL persistence.
-
-When the console is served behind HTTPS, set `NOPAGER_COOKIE_SECURE=true`. Terminate TLS at a trusted reverse proxy and expose only the web console plus the two webhook routes required by your integrations.
-
-The API is available at `http://localhost:8080`; `/healthz` reports process health and `/readyz` verifies PostgreSQL readiness.
+`pause` is the Kill Switch: it blocks mutation actions while monitoring remains active.
 
 ## Safety model
 
 Safe Mode is the default. NoPager may diagnose, repair, build, test, open a PR, deploy a Preview, and verify it automatically; a production promotion waits for explicit administrator approval.
 
-Autopilot is experimental and only permits low-risk, verified, reversible promotion. A missing or failed Preview verification is a hard production block, not something that human approval can bypass. High-risk changes—including dependency manifests, database schema, IAM, DNS, billing, and secrets—are escalated. The Kill Switch pauses mutations while retaining read-only health monitoring and evidence collection.
+Autopilot is experimental and only permits low-risk, verified, reversible promotion. A missing or failed Preview verification is a hard production block, not something that human approval can bypass. High-risk changes—including dependency manifests, database schema, IAM, DNS, billing, and secrets—are escalated. The Kill Switch pauses mutations while retaining read-only monitoring and evidence collection; resuming protection restarts paused incidents from fresh context instead of continuing stale mutation state.
+
+If production verification fails after a repair promotion, NoPager explicitly restores the previously recorded READY known-good Vercel deployment. It does not infer current traffic from Vercel's `target=production` field.
 
 Repair execution uses a non-root, resource-limited, capability-dropped Docker container with a read-only root filesystem. Network access is disabled for build and test and is enabled only for recognized dependency-fetch commands. The trusted worker needs access to the Docker daemon; repair containers never receive the daemon socket or service credentials.
 
@@ -54,18 +67,31 @@ Detect → Collect Context → Diagnose → Repair → Build/Test
        → Production → Watch → Resolve or Rollback
 ```
 
-Jobs and incident transitions are durable and idempotency-keyed in PostgreSQL. A failed validation is supplied to a fresh repair attempt; after three failed patches NoPager escalates instead of looping.
+Jobs and incident transitions are durable and idempotency-keyed in PostgreSQL. A failed validation is supplied to a fresh repair attempt; after the configured repair-attempt limit NoPager escalates instead of looping.
+
+Production deployment failures can arrive through Vercel webhooks when available, but NoPager also polls the selected Vercel project approximately every 30 seconds. The polling path makes webhook support optional and uses deployment IDs for incident deduplication.
 
 ## Architecture
 
 - `apps/server`: Rust HTTP API, webhook verification, local authentication, and setup.
 - `apps/worker`: Rust durable job processor and the end-to-end incident workflow.
 - `apps/cli`: Rust self-hosting CLI (`init`, `doctor`, `status`, `protect`, `incidents`, `logs`, `pause`, `resume`).
-- `apps/web`: Next.js operations console implementing Overview, Incidents, Incident Detail, Integrations, AI Provider, and Safety & Policy.
+- `apps/web`: Next.js operations console and the public signed-webhook proxy.
 - `crates/*`: Rust domain, database, provider, connector, monitoring, policy, cryptography, webhook, and sandbox modules.
 - PostgreSQL: durable configuration, incidents, audit events, deployments, attempts, and jobs.
 
 See [the Rust-first architecture decision](docs/architecture/0001-rust-first.md).
+
+## Webhooks
+
+The public webhook URLs are on the same origin as the web console:
+
+```text
+https://YOUR_NOPAGER_HOST/api/webhooks/github
+https://YOUR_NOPAGER_HOST/api/webhooks/vercel
+```
+
+The Next.js routes forward only the provider headers needed for signature validation plus the raw request body to the private Rust API. GitHub webhook verification is part of the standard Alpha setup. The Vercel webhook is optional because REST polling remains active as a fallback.
 
 ## Local development
 
@@ -88,11 +114,7 @@ cargo run -p nopager-worker
 pnpm --filter @nopager/web dev
 ```
 
-Copy `.env.example` to `.env`; never commit the populated file. `nopager doctor` checks local dependencies, configuration, and API reachability.
-
-## Webhooks
-
-Configure the GitHub App webhook to `/api/v1/integrations/github/webhook` and the Vercel webhook to `/api/v1/integrations/vercel/webhook` on the externally reachable API origin. Both endpoints authenticate the raw request body before persisting a deduplicated delivery.
+Copy `.env.example` to `.env`; never commit the populated file. `nopager doctor` checks Docker/Compose, local configuration, and API/PostgreSQL readiness.
 
 ## Dogfood demo
 
@@ -108,8 +130,9 @@ For design-partner validation, use:
 - GitHub and Vercel are the only production connectors.
 - One administrator and one protected app per OSS installation.
 - Preview verification uses HTTP health checks; browser verification is planned after Alpha.
-- GitHub/Vercel credential setup is still manual and is the largest onboarding friction item.
-- No Kubernetes, general observability backend, infrastructure provisioning, or automatic high-risk database/IAM/DNS actions.
+- Initial GitHub App/Vercel credentials are still entered manually, but repository/project metadata is discovered and tested by the wizard.
+- External design-partner readiness still requires the real dogfood scenarios in the acceptance plan; CI alone is not treated as proof of safe production behavior.
+- No Kubernetes, general observability backend, infrastructure provisioning, Team/RBAC/billing, or automatic high-risk database/IAM/DNS actions.
 
 ## Security and contributions
 
