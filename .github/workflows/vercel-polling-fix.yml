@@ -1,0 +1,86 @@
+name: Vercel polling fix
+
+on:
+  push:
+    branches: [directly-usable-alpha]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: directly-usable-alpha
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          components: rustfmt
+      - name: Fix scheduling and owned deployment fields
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('apps/worker/src/main.rs')
+          text = path.read_text()
+
+          if 'failed to schedule Vercel polling fallback' not in text:
+              needle = '''                if let Err(error) = database.enqueue_due_health_checks(100).await {
+                      error!(%error, "failed to schedule health checks");
+                  }
+          '''
+              replacement = '''                if let Err(error) = database.enqueue_due_health_checks(100).await {
+                      error!(%error, "failed to schedule health checks");
+                  }
+                  if let Err(error) = database.enqueue_due_vercel_polls(100).await {
+                      error!(%error, "failed to schedule Vercel polling fallback");
+                  }
+          '''
+              if needle not in text:
+                  raise SystemExit('health scheduler block not found')
+              text = text.replace(needle, replacement, 1)
+
+          old = '''        let state = deployment
+                  .ready_state
+                  .as_deref()
+                  .or(deployment.state.as_deref())
+                  .unwrap_or("UNKNOWN");
+              let url = https_url(&deployment.url);
+              let sha = deployment
+                  .meta
+                  .get("githubCommitSha")
+                  .and_then(Value::as_str)
+                  .unwrap_or("unknown");
+          '''
+          new = '''        let state = deployment
+                  .ready_state
+                  .as_deref()
+                  .or(deployment.state.as_deref())
+                  .unwrap_or("UNKNOWN")
+                  .to_owned();
+              let url = https_url(&deployment.url);
+              let sha = deployment
+                  .meta
+                  .get("githubCommitSha")
+                  .and_then(Value::as_str)
+                  .unwrap_or("unknown")
+                  .to_owned();
+          '''
+          if old not in text:
+              raise SystemExit('deployment state block not found')
+          text = text.replace(old, new, 1)
+          text = text.replace('                        sha,\n                        &url,\n                        state,', '                        &sha,\n                        &url,\n                        &state,', 1)
+          text = text.replace('            if matches!(state, "ERROR" | "CANCELED" | "CANCELLED") {', '            if matches!(state.as_str(), "ERROR" | "CANCELED" | "CANCELLED") {', 1)
+          path.write_text(text)
+          PY
+          cargo fmt --all
+          git diff --check
+      - name: Commit fix and remove one-shot workflow
+        run: |
+          git config user.name "NoPager CI"
+          git config user.email "actions@users.noreply.github.com"
+          git add apps/worker/src/main.rs
+          git rm .github/workflows/vercel-polling-fix.yml
+          git commit -m "Schedule Vercel polling and own deployment metadata safely"
+          git push origin HEAD:directly-usable-alpha
