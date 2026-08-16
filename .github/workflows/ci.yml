@@ -13,9 +13,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.92.0
-        with:
-          components: clippy,rustfmt
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.92.0 --profile minimal --component clippy --component rustfmt
+          rustup override set 1.92.0
       - uses: actions/setup-node@v6
         with:
           node-version: 22
