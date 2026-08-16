@@ -28,17 +28,33 @@ set_env() {
   mv "$tmp" .env
 }
 
-current_master_key=$(awk -F= '$1 == "NOPAGER_MASTER_KEY" { sub(/^[^=]*=/, ""); print; exit }' .env)
-if [ -z "$current_master_key" ]; then
+read_env() {
+  key=$1
+  awk -v key="$key" '
+    index($0, key "=") == 1 { sub(/^[^=]*=/, ""); print; exit }
+  ' .env
+}
+
+generate_secret() {
   if command -v openssl >/dev/null 2>&1; then
-    master_key=$(openssl rand -base64 32 | tr -d '\n')
+    openssl rand -base64 32 | tr -d '\n'
   elif command -v python3 >/dev/null 2>&1; then
-    master_key=$(python3 -c 'import base64, os; print(base64.b64encode(os.urandom(32)).decode())')
+    python3 -c 'import base64, os; print(base64.b64encode(os.urandom(32)).decode())'
   else
-    fail "OpenSSL or Python 3 is required once to generate NOPAGER_MASTER_KEY."
+    fail "OpenSSL or Python 3 is required once to generate NoPager secrets."
   fi
-  set_env NOPAGER_MASTER_KEY "$master_key"
+}
+
+current_master_key=$(read_env NOPAGER_MASTER_KEY)
+if [ -z "$current_master_key" ]; then
+  set_env NOPAGER_MASTER_KEY "$(generate_secret)"
   printf 'Generated NOPAGER_MASTER_KEY\n'
+fi
+
+current_admin_token=$(read_env NOPAGER_ADMIN_TOKEN)
+if [ -z "$current_admin_token" ]; then
+  set_env NOPAGER_ADMIN_TOKEN "$(generate_secret)"
+  printf 'Generated NOPAGER_ADMIN_TOKEN for local CLI/operator access\n'
 fi
 
 docker_gid=$(docker run --rm -v /var/run/docker.sock:/sock alpine:3.22 stat -c '%g' /sock 2>/dev/null || true)
@@ -49,9 +65,9 @@ else
   printf 'Warning: could not detect Docker socket group; keeping DOCKER_GID from .env.\n' >&2
 fi
 
-web_port=$(awk -F= '$1 == "NOPAGER_WEB_PORT" { print $2; exit }' .env)
+web_port=$(read_env NOPAGER_WEB_PORT)
 web_port=${web_port:-3000}
-api_port=$(awk -F= '$1 == "NOPAGER_API_PORT" { print $2; exit }' .env)
+api_port=$(read_env NOPAGER_API_PORT)
 api_port=${api_port:-8080}
 
 printf 'Building and starting NoPager...\n'
@@ -83,4 +99,5 @@ printf '\nNoPager is ready.\n'
 printf 'Console: http://localhost:%s/setup\n' "$web_port"
 printf 'Local API health: http://127.0.0.1:%s/healthz\n' "$api_port"
 printf '\nNext: open the console and complete GitHub, Vercel, AI provider, and health-check setup.\n'
+printf 'CLI/operator commands read NOPAGER_ADMIN_TOKEN from .env automatically.\n'
 printf 'Logs: docker compose logs -f server worker web\n'
