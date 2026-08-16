@@ -25,17 +25,17 @@ Do not add Team, multi-service coordination, RBAC, SSO, billing, AWS, Azure, GCP
 
 A release candidate is ready for a design partner only when the following end-to-end path works against a real GitHub repository and real Vercel project:
 
-1. Start NoPager with `docker compose up -d --build`.
+1. Start NoPager with `sh scripts/quickstart.sh` and confirm the script reports the stack ready.
 2. Open `/setup` and create the local administrator.
-3. Connect GitHub.
-4. Connect Vercel.
-5. Configure a BYOK model provider.
-6. Configure the production URL and health URL.
+3. Connect GitHub. NoPager must discover the repository ID and default branch from the selected installation/repository.
+4. Connect Vercel. Team ID is optional for personal projects; the project lookup must succeed.
+5. Configure and test a BYOK model provider with an explicit model ID.
+6. Configure the public HTTPS production URL and health URL and pass the live health test.
 7. Keep Safe Mode enabled and click **Protect App**.
-8. Inject one of the supported production failures below.
-9. NoPager opens exactly one deduplicated incident.
-10. NoPager collects the recent commit/deployment context.
-11. The model produces a root-cause diagnosis and narrowly scoped repair.
+8. Run each of the supported production-failure scenarios below on the dogfood app.
+9. NoPager opens exactly one deduplicated incident for each injected failure.
+10. NoPager collects recent commit/deployment context, including bounded verified GitHub text-diff evidence when available.
+11. The model produces a root-cause diagnosis and a narrowly scoped repair grounded in that verified source evidence.
 12. The repair is applied only inside the isolated workspace.
 13. Build/test validation passes before a repair branch is trusted.
 14. NoPager opens a repair PR.
@@ -46,6 +46,8 @@ A release candidate is ready for a design partner only when the following end-to
 19. Administrator approval promotes the verified deployment.
 20. Production verification passes before the incident becomes `RESOLVED`.
 21. Audit events and the complete incident timeline remain available afterwards.
+22. Separately force a production-verification failure and prove NoPager restores the recorded known-good deployment and verifies rollback.
+23. Activate the Kill Switch during a controlled incident and prove read-only monitoring continues while mutating work remains blocked.
 
 If any mandatory safety gate fails, the flow must stop or roll back. It must never "best effort" its way into production.
 
@@ -87,7 +89,9 @@ Pass criteria:
 
 ## Failure-safety matrix
 
+- **Verified GitHub source/diff context is unavailable:** Refuse to invent a repair patch and escalate/retry according to the incident path.
 - **Model proposes a high-risk action:** Escalate. Do not patch or deploy.
+- **Model patch touches a deterministic sensitive path:** Block it even if the model labels the repair low-risk.
 - **Model patch cannot be applied cleanly:** Fail the attempt. Do not create a trusted Preview.
 - **Declared changed-file set differs from applied patch:** Fail the attempt.
 - **Dependency manifest changes:** Escalate for human review in Alpha.
@@ -106,7 +110,7 @@ The product target is a first protected app within ten minutes for a technically
 
 Measure it with a fresh machine/profile. Do not mark the gate complete by developer familiarity alone.
 
-Current Alpha caveat: GitHub App ID, Installation ID, repository ID, private key, webhook secret, Vercel project/team IDs, token, and webhook secret are still entered manually. This is acceptable for the first design partners, but it is the largest setup-friction item and should be replaced by guided OAuth/App installation after the core demand is proven.
+Current Alpha caveat: GitHub App ID, Installation ID, repository owner/name, private key, and webhook secret are still entered manually. Vercel project ID/name and token are entered manually, with Team ID optional for personal projects and the Vercel webhook secret optional because polling remains active. Repository ID/default branch and canonical Vercel project metadata are discovered by NoPager rather than typed manually. This manual credential flow is acceptable for the first design partners, but guided OAuth/App installation should replace it after the core demand is proven.
 
 ## Design partner operating rule
 
