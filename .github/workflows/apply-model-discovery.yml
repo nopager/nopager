@@ -71,6 +71,10 @@ jobs:
           rustup override set 1.92.0
           pnpm exec prettier --write apps/web/app/setup/page.tsx
           cargo fmt --all
+          echo '--- transformed server 730-790 ---'
+          nl -ba apps/server/src/main.rs | sed -n '730,790p'
+          echo '--- transformed provider discovery symbols ---'
+          grep -R -n "discover_available_models\|impl Into<SecretString>\|impl Into<secrecy::Secret" apps/server crates/nopager-providers || true
           pnpm format:check
           pnpm lint
           pnpm typecheck
