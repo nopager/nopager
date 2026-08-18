@@ -144,7 +144,7 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
         return value.to_owned();
     }
     let mut bounded = value.chars().take(max_chars).collect::<String>();
-    bounded.push_str("\n");
+    bounded.push('\n');
     bounded.push_str(TRUNCATED);
     bounded
 }
