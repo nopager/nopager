@@ -8,6 +8,14 @@ The v0.1 Alpha supports one self-hosted administrator, one protected web app, Gi
 
 > **Design Partner Alpha:** the project is intentionally scope-frozen around proving one safe GitHub → Vercel repair loop with real production-like incidents. See [the Alpha acceptance plan](docs/DESIGN_PARTNER_ALPHA.md). This is not yet a claim of broad production readiness.
 
+## Who NoPager is for
+
+NoPager is for production software teams where founders and developers still carry on-call responsibility because a dedicated 24/7 SRE function is too expensive or unjustified.
+
+The goal is to make trustworthy production maintenance available before a team can justify hiring an SRE team—not to sell the cheapest possible model tokens. The open-source Alpha is self-hosted and BYOK so operators keep their existing GitHub, Vercel, and model-provider accounts while NoPager focuses on the response loop: context, repair, safety policy, verification, and rollback.
+
+Long term, NoPager can become an autonomous production control plane, but it should orchestrate mature infrastructure rather than rebuild it. See [Product principles](docs/PRODUCT_PRINCIPLES.md).
+
 ## Quick start
 
 Requirements: Docker Engine 26 or newer with Compose v2 and a public HTTPS production health URL. Engine 26 introduced the volume-subpath mount used to expose only one incident workspace to a repair container.
@@ -61,6 +69,20 @@ Autopilot is experimental and only permits low-risk, verified, reversible promot
 If production verification fails after a repair promotion, NoPager explicitly restores the previously recorded READY known-good Vercel deployment. It does not infer current traffic from Vercel's `target=production` field.
 
 Repair execution uses a non-root, resource-limited, capability-dropped Docker container with a read-only root filesystem. Network access is disabled for build and test and is enabled only for recognized dependency-fetch commands. The trusted worker needs access to the Docker daemon; repair containers never receive the daemon socket or service credentials.
+
+## Code privacy
+
+NoPager's privacy boundary is **minimum necessary incident context**, not "upload the repository and trust the model provider."
+
+The complete repository stays in the trusted self-hosted worker workspace for repair and validation. NoPager does **not** serialize the whole repository as a model prompt. External model calls receive bounded incident evidence such as verified recent GitHub diff context, stack traces, deployment metadata, and health evidence.
+
+Before any structured incident input is sent to the selected BYOK model provider, the provider boundary deterministically redacts secret-bearing JSON fields, private-key blocks, common credential assignments/token formats, and credentials embedded in URLs. Verified GitHub diff evidence is redacted before it is preserved for the repair stage.
+
+This is deliberately not marketed as "no source code ever leaves the machine": relevant code diffs can still be sent to the operator's selected OpenAI, Anthropic, or Gemini account. Provider retention/training terms are provider/account policy, not a cryptographic NoPager guarantee. Confidential inference/TEE and fully local or air-gapped inference are future high-assurance modes, not Alpha features.
+
+**The model doesn't need your repository. It needs the evidence.**
+
+See [Code privacy and model boundary](docs/PRIVACY.md) for the exact current guarantee.
 
 ## Incident lifecycle
 
@@ -139,7 +161,7 @@ For design-partner validation, use:
 
 ## Security and contributions
 
-Read [SECURITY.md](SECURITY.md) before reporting a vulnerability and [CONTRIBUTING.md](CONTRIBUTING.md) before opening a change. Never include production credentials, full logs containing secrets, or customer data in issues.
+Read [SECURITY.md](SECURITY.md) and [Code privacy](docs/PRIVACY.md) before reporting a vulnerability, and [CONTRIBUTING.md](CONTRIBUTING.md) before opening a change. Never include production credentials, full logs containing secrets, or customer data in issues.
 
 Back up `.env` together with PostgreSQL. Losing `NOPAGER_MASTER_KEY` makes encrypted integration credentials unrecoverable; do not rotate it casually as a troubleshooting step.
 
