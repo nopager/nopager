@@ -1,6 +1,6 @@
 use std::{
     path::{Component, Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -16,6 +16,15 @@ const API_VERSION: &str = "2022-11-28";
 const SOURCE_CONTEXT_MARKER: &str = "NoPager verified GitHub diff context";
 const MAX_COMMIT_CONTEXT_CHARS: usize = 48_000;
 const MAX_FILE_PATCH_CHARS: usize = 12_000;
+const GITHUB_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const GITHUB_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+fn github_http_client() -> Result<Client, ConnectorError> {
+    Ok(Client::builder()
+        .connect_timeout(GITHUB_CONNECT_TIMEOUT)
+        .timeout(GITHUB_REQUEST_TIMEOUT)
+        .build()?)
+}
 
 #[derive(Debug, Clone)]
 pub struct GitHubAppAuth {
@@ -82,7 +91,7 @@ impl GitHubAppAuth {
                 self.installation_id
             ))
             .map_err(|error| ConnectorError::InvalidConfiguration(error.to_string()))?;
-        let response = github_headers(Client::new().post(endpoint))
+        let response = github_headers(github_http_client()?.post(endpoint))
             .bearer_auth(self.jwt_at(now)?)
             .json(&serde_json::json!({
                 "repositories": [repository],
@@ -245,7 +254,7 @@ impl GitHubClient {
             ));
         }
         Ok(Self {
-            http: Client::new(),
+            http: github_http_client()?,
             token,
             api_base,
         })
