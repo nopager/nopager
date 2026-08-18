@@ -63,12 +63,12 @@ jobs:
               '        Backend::OpenAi | Backend::Anthropic => {\n            item.get("id")\n        }\n        Backend::Gemini => item.get("name"),\n',
               1,
           )
-          old_auth = '        let expected_auth = expected_auth.into();\n'
+          old_auth = 'let expected_auth = expected_auth.into();'
           if rendered.count(old_auth) != 1:
               raise SystemExit(f'expected provider test auth conversion once, found {rendered.count(old_auth)}')
           rendered = rendered.replace(
               old_auth,
-              '        let expected_auth: SecretString = expected_auth.into();\n',
+              'let expected_auth: SecretString = expected_auth.into();',
               1,
           )
           http.write_text(rendered)
