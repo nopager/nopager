@@ -18,6 +18,7 @@ const MAX_COMMIT_CONTEXT_CHARS: usize = 48_000;
 const MAX_FILE_PATCH_CHARS: usize = 12_000;
 const GITHUB_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const GITHUB_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const REPAIR_CI_NOTICE: &str = "NoPager intentionally suppresses standard GitHub Actions for this AI-authored repair commit so unreviewed code is not executed with repository workflow credentials. Review the patch before running trusted CI. Repository workflows using pull_request_target and third-party CI require repository-specific controls.";
 
 fn github_http_client() -> Result<Client, ConnectorError> {
     Ok(Client::builder()
@@ -345,7 +346,7 @@ impl GitHubClient {
             let commit: CommitResponse = decode(
                 self.request(reqwest::Method::POST, &format!("{repo}/git/commits"))?
                     .json(&serde_json::json!({
-                        "message": input.title,
+                        "message": repair_commit_message(&input.title),
                         "tree": tree.sha,
                         "parents": [input.base_sha]
                     }))
@@ -371,8 +372,8 @@ impl GitHubClient {
             });
         };
         let body = format!(
-            "## Diagnosis\n{}\n\n## Verification\n{}\n\n## Rollback\n{}",
-            input.diagnosis, input.verification, input.rollback
+            "## Diagnosis\n{}\n\n## Verification\n{}\n\n## Rollback\n{}\n\n## CI safety\n{}",
+            input.diagnosis, input.verification, input.rollback, REPAIR_CI_NOTICE
         );
         let response = self
             .request(reqwest::Method::POST, &format!("{repo}/pulls"))?
@@ -380,7 +381,8 @@ impl GitHubClient {
                 "title": input.title,
                 "head": branch,
                 "base": input.base_branch,
-                "body": body
+                "body": body,
+                "draft": true
             }))
             .send()
             .await?;
@@ -468,6 +470,10 @@ impl GitHubClient {
             .await
             .map_err(|error| ConnectorError::Archive(error.to_string()))?
     }
+}
+
+fn repair_commit_message(title: &str) -> String {
+    format!("{title}\n\n[skip ci]\n\n{REPAIR_CI_NOTICE}")
 }
 
 fn commit_message_with_patch_context(message: &str, files: &[CommitFile]) -> String {
@@ -659,6 +665,14 @@ mod tests {
             repair_branch("0195-abcd", "Fix: Login 500!"),
             "nopager/incident-0195abcd-fix-login-500"
         );
+    }
+
+    #[test]
+    fn repair_commits_suppress_standard_actions_until_review() {
+        let message = repair_commit_message("Repair checkout regression");
+        assert!(message.starts_with("Repair checkout regression"));
+        assert!(message.contains("[skip ci]"));
+        assert!(message.contains("unreviewed code"));
     }
 
     #[test]
