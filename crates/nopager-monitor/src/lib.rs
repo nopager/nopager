@@ -219,16 +219,12 @@ pub async fn check_http(
         .is_some_and(|value| matches!(value, Host::Domain(_)))
     {
         let dns_timeout = timeout.min(Duration::from_secs(5));
-        let resolved: Vec<SocketAddr> = match tokio::time::timeout(
-            dns_timeout,
-            tokio::net::lookup_host((host, port)),
-        )
-        .await
-        {
-            Ok(Ok(addresses)) => addresses.collect(),
-            Ok(Err(_)) => return Ok(failed_observation(started, "dns")),
-            Err(_) => return Ok(failed_observation(started, "dns_timeout")),
-        };
+        let resolved: Vec<SocketAddr> =
+            match tokio::time::timeout(dns_timeout, tokio::net::lookup_host((host, port))).await {
+                Ok(Ok(addresses)) => addresses.collect(),
+                Ok(Err(_)) => return Ok(failed_observation(started, "dns")),
+                Err(_) => return Ok(failed_observation(started, "dns_timeout")),
+            };
         validate_resolved_addresses(resolved.iter().map(SocketAddr::ip))?;
         // Pin the connection to the addresses we just validated. This prevents
         // a second DNS resolution from turning the validation/request gap into
