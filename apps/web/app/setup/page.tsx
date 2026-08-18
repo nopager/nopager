@@ -280,7 +280,7 @@ function description(step: number) {
     "Your local account controls production approvals.",
     "Add the GitHub App and repository NoPager may repair. Repository ID and default branch are discovered automatically.",
     "Select the Vercel project used for previews and production. Team ID and webhook secret are optional; polling remains active without a Vercel webhook.",
-    "Your API key is encrypted locally and never shown again. Enter the exact model ID supported by your provider so NoPager does not depend on a stale hardcoded model name.",
+    "Your API key is encrypted locally and never shown again. The full repository stays in the self-hosted worker; NoPager sends only bounded incident evidence to your BYOK model provider after local secret redaction. Relevant code diffs may still leave this host. Enter the exact model ID supported by your provider.",
     "NoPager will require a passing public HTTPS health check.",
     "Safe Mode requires approval before production changes.",
   ][step];
