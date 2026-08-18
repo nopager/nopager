@@ -63,6 +63,11 @@ jobs:
               '        Backend::OpenAi | Backend::Anthropic => {\n            item.get("id")\n        }\n        Backend::Gemini => item.get("name"),\n',
               1,
           )
+          check_start = rendered.find('async fn check(response: reqwest::Response)')
+          decode_start = rendered.find('async fn decode_json(', check_start)
+          if check_start == -1 or decode_start == -1:
+              raise SystemExit('obsolete provider response helper was not found after transform')
+          rendered = rendered[:check_start] + rendered[decode_start:]
           http.write_text(rendered)
           PY
       - name: Format and validate model discovery
