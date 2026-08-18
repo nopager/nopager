@@ -1,0 +1,48 @@
+name: Normalize manifest setup
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  normalize:
+    if: github.event.pull_request.head.ref == 'agent/github-manifest-setup-v2' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Enable pinned pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.32.1 --activate
+      - run: pnpm install --frozen-lockfile
+      - name: Normalize implementation
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('apps/web/app/setup/page.tsx')
+          text = path.read_text()
+          old = 'value={data.githubWebhookSecret || generateWebhookSecret()}'
+          if old not in text:
+              raise SystemExit('expected manual webhook-secret expression not found')
+          path.write_text(text.replace(old, 'value={data.githubWebhookSecret}', 1))
+          PY
+          pnpm exec prettier --write \
+            apps/web/app/setup/page.tsx \
+            apps/web/app/api/github-manifest/route.ts
+          if git diff --quiet -- apps/web/app/setup/page.tsx apps/web/app/api/github-manifest/route.ts; then
+            echo "Manifest setup already normalized"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/web/app/setup/page.tsx apps/web/app/api/github-manifest/route.ts
+          git commit -m "Normalize GitHub manifest setup"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
