@@ -19,7 +19,8 @@ use nopager_crypto::SecretCipher;
 use nopager_db::{Database, ProtectedAppSetup};
 use nopager_monitor::{check_http, validate_health_url};
 use nopager_providers::{
-    AnthropicProvider, GeminiProvider, ModelProvider, OpenAiProvider, discover_available_models,
+    AnthropicProvider, GeminiProvider, ModelProvider, OpenAiProvider, ProviderError,
+    discover_available_models,
 };
 use nopager_webhooks::{verify_github, verify_vercel};
 use rand::RngCore;
@@ -432,7 +433,7 @@ async fn test_provider_connection(
                 tracing::warn!(%error, "model provider connection test failed");
                 api_error(
                     StatusCode::UNPROCESSABLE_ENTITY,
-                    "provider_connection_failed",
+                    provider_connection_error_code(&error),
                 )
             }
         },
@@ -534,6 +535,14 @@ fn configured_provider(
 
 fn connection_success() -> (StatusCode, Json<Value>) {
     (StatusCode::OK, Json(json!({ "connected": true })))
+}
+
+fn provider_connection_error_code(error: &ProviderError) -> &'static str {
+    match error {
+        ProviderError::ModelUnavailable(_) => "provider_model_unavailable",
+        ProviderError::CapabilityProbeFailed { .. } => "provider_model_capability_failed",
+        _ => "provider_connection_failed",
+    }
 }
 
 async fn protect_app(
@@ -664,7 +673,7 @@ async fn protect_app(
         tracing::warn!(%error, "model provider setup connection test failed");
         return api_error(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "provider_connection_failed",
+            provider_connection_error_code(&error),
         )
         .into_response();
     }

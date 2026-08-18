@@ -99,6 +99,10 @@ const setupErrors: Record<string, string> = {
   provider_api_key_required: "Enter your provider API key first.",
   provider_models_empty:
     "The provider connection worked but returned no usable models for this account. You can still enter a model ID manually.",
+  provider_model_unavailable:
+    "That model ID is not available to this provider account. Load available models or choose another exact model ID.",
+  provider_model_capability_failed:
+    "NoPager could not complete its structured-output capability check with this model. The model may not support the required API features, or the provider may have temporarily rejected the request. Try another model or retry once.",
   production_health_failed:
     "The health URL did not return a successful HTTP 200 response. It must be publicly reachable from the NoPager host without browser login.",
   unsafe_health_check_url:
@@ -1036,7 +1040,10 @@ function fields(
           Your API key is encrypted locally before database persistence. Model
           usage is billed directly by your selected provider. Only bounded,
           locally redacted incident evidence is sent to that provider; the full
-          repository is not uploaded as a prompt.
+          repository is not uploaded as a prompt. Loading the model list is
+          metadata-only. Test & continue sends a very small structured-output
+          capability probe through your provider account, and final setup may
+          repeat that check to fail closed before production protection starts.
         </SetupNote>
         <label>
           Provider

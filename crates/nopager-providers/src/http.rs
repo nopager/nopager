@@ -18,12 +18,19 @@ const MAX_PRESERVED_SOURCE_CONTEXT_CHARS: usize = 96_000;
 const REDACTED: &str = "[REDACTED_BY_NOPAGER]";
 const REDACTED_PRIVATE_KEY: &str = "[REDACTED_PRIVATE_KEY_BY_NOPAGER]";
 const MAX_DISCOVERED_MODELS: usize = 200;
+const CAPABILITY_PROBE_MAX_OUTPUT_TOKENS: u64 = 1024;
+const CAPABILITY_PROBE_SYSTEM_PROMPT: &str = "This is a NoPager setup capability probe. Return only the requested structured JSON and set ok to true.";
 
 #[derive(Clone, Copy)]
 enum Backend {
     OpenAi,
     Anthropic,
     Gemini,
+}
+
+#[derive(serde::Deserialize)]
+struct CapabilityProbe {
+    ok: bool,
 }
 
 #[derive(Clone)]
@@ -206,10 +213,36 @@ impl HttpProvider {
 
     async fn test_connection(&self) -> Result<(), ProviderError> {
         let models = self.list_models().await?;
-        if models.iter().any(|model| model.id == self.model) {
+        if !models.iter().any(|model| model.id == self.model) {
+            return Err(ProviderError::ModelUnavailable(self.model.clone()));
+        }
+        self.capability_probe().await
+    }
+
+    async fn capability_probe(&self) -> Result<(), ProviderError> {
+        let probe: CapabilityProbe = self
+            .structured_with_config(
+                "capability_probe",
+                capability_probe_schema(),
+                json!({ "probe": "nopager_setup" }),
+                CAPABILITY_PROBE_SYSTEM_PROMPT,
+                Some(CAPABILITY_PROBE_MAX_OUTPUT_TOKENS),
+            )
+            .await
+            .map_err(|error| match error {
+                ProviderError::Authentication => ProviderError::Authentication,
+                other => ProviderError::CapabilityProbeFailed {
+                    model: self.model.clone(),
+                    reason: other.to_string(),
+                },
+            })?;
+        if probe.ok {
             Ok(())
         } else {
-            Err(ProviderError::ModelUnavailable(self.model.clone()))
+            Err(ProviderError::CapabilityProbeFailed {
+                model: self.model.clone(),
+                reason: "provider returned ok=false".to_owned(),
+            })
         }
     }
 
@@ -233,21 +266,29 @@ impl HttpProvider {
         &self,
         name: &str,
         schema: Value,
+        input: Value,
+    ) -> Result<T, ProviderError> {
+        self.structured_with_config(name, schema, input, SYSTEM_PROMPT, None)
+            .await
+    }
+
+    async fn structured_with_config<T: DeserializeOwned>(
+        &self,
+        name: &str,
+        schema: Value,
         mut input: Value,
+        system_prompt: &str,
+        max_output_tokens: Option<u64>,
     ) -> Result<T, ProviderError> {
         sanitize_model_value(&mut input);
         let prompt = format!(
-            "Return the requested {name} for this incident input:\n{}",
+            "Return the requested {name} for this input:\n{}",
             serde_json::to_string(&input).map_err(|_| ProviderError::Decode)?
         );
+        let body =
+            self.structured_request_body(name, schema, &prompt, system_prompt, max_output_tokens);
         let response = match self.backend {
             Backend::OpenAi => {
-                let body = json!({
-                    "model": self.model,
-                    "instructions": SYSTEM_PROMPT,
-                    "input": prompt,
-                    "text": { "format": { "type": "json_schema", "name": name, "strict": true, "schema": schema } }
-                });
                 decode_json(
                     self.request(Method::POST, "responses")?
                         .json(&body)
@@ -258,13 +299,6 @@ impl HttpProvider {
                 .await?
             }
             Backend::Anthropic => {
-                let body = json!({
-                    "model": self.model,
-                    "max_tokens": 8192,
-                    "system": SYSTEM_PROMPT,
-                    "messages": [{ "role": "user", "content": prompt }],
-                    "output_config": { "format": { "type": "json_schema", "schema": schema } }
-                });
                 decode_json(
                     self.request(Method::POST, "messages")?
                         .json(&body)
@@ -275,11 +309,6 @@ impl HttpProvider {
                 .await?
             }
             Backend::Gemini => {
-                let body = json!({
-                    "systemInstruction": { "parts": [{ "text": SYSTEM_PROMPT }] },
-                    "contents": [{ "role": "user", "parts": [{ "text": prompt }] }],
-                    "generationConfig": { "responseMimeType": "application/json", "responseJsonSchema": schema }
-                });
                 let path = format!("v1beta/models/{}:generateContent", self.model);
                 decode_json(
                     self.request(Method::POST, &path)?
@@ -293,6 +322,51 @@ impl HttpProvider {
         };
         let text = extract_text(self.backend, &response)?;
         serde_json::from_str(text).map_err(|_| ProviderError::Decode)
+    }
+
+    fn structured_request_body(
+        &self,
+        name: &str,
+        schema: Value,
+        prompt: &str,
+        system_prompt: &str,
+        max_output_tokens: Option<u64>,
+    ) -> Value {
+        match self.backend {
+            Backend::OpenAi => {
+                let mut body = json!({
+                    "model": self.model,
+                    "instructions": system_prompt,
+                    "input": prompt,
+                    "text": { "format": { "type": "json_schema", "name": name, "strict": true, "schema": schema } }
+                });
+                if let Some(max_output_tokens) = max_output_tokens {
+                    body["max_output_tokens"] = json!(max_output_tokens);
+                }
+                body
+            }
+            Backend::Anthropic => json!({
+                "model": self.model,
+                "max_tokens": max_output_tokens.unwrap_or(8192),
+                "system": system_prompt,
+                "messages": [{ "role": "user", "content": prompt }],
+                "output_config": { "format": { "type": "json_schema", "schema": schema } }
+            }),
+            Backend::Gemini => {
+                let mut generation_config = json!({
+                    "responseMimeType": "application/json",
+                    "responseJsonSchema": schema
+                });
+                if let Some(max_output_tokens) = max_output_tokens {
+                    generation_config["maxOutputTokens"] = json!(max_output_tokens);
+                }
+                json!({
+                    "systemInstruction": { "parts": [{ "text": system_prompt }] },
+                    "contents": [{ "role": "user", "parts": [{ "text": prompt }] }],
+                    "generationConfig": generation_config
+                })
+            }
+        }
     }
 }
 
@@ -687,6 +761,17 @@ fn string_array() -> Value {
     json!({ "type": "array", "items": { "type": "string" } })
 }
 
+fn capability_probe_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "ok": { "type": "boolean" }
+        },
+        "required": ["ok"]
+    })
+}
+
 fn diagnosis_schema() -> Value {
     json!({
         "type": "object",
@@ -785,6 +870,63 @@ mod tests {
             parse_available_models(Backend::OpenAi, &json!({"models": []})),
             Err(ProviderError::Decode)
         ));
+    }
+
+    #[test]
+    fn capability_probe_uses_the_runtime_structured_output_path_with_a_small_budget() {
+        let schema = capability_probe_schema();
+        for backend in [Backend::OpenAi, Backend::Anthropic, Backend::Gemini] {
+            let provider = HttpProvider::new(
+                backend,
+                SecretString::from("test-key".to_owned()),
+                "test-model".to_owned(),
+                Url::parse("https://example.com/").unwrap(),
+            )
+            .unwrap();
+            let body = provider.structured_request_body(
+                "capability_probe",
+                schema.clone(),
+                "Return ok=true",
+                CAPABILITY_PROBE_SYSTEM_PROMPT,
+                Some(CAPABILITY_PROBE_MAX_OUTPUT_TOKENS),
+            );
+            match backend {
+                Backend::OpenAi => {
+                    assert_eq!(body["model"], "test-model");
+                    assert_eq!(
+                        body["max_output_tokens"],
+                        CAPABILITY_PROBE_MAX_OUTPUT_TOKENS
+                    );
+                    assert_eq!(body["text"]["format"]["type"], "json_schema");
+                    assert_eq!(body["text"]["format"]["strict"], true);
+                }
+                Backend::Anthropic => {
+                    assert_eq!(body["model"], "test-model");
+                    assert_eq!(body["max_tokens"], CAPABILITY_PROBE_MAX_OUTPUT_TOKENS);
+                    assert_eq!(body["output_config"]["format"]["type"], "json_schema");
+                }
+                Backend::Gemini => {
+                    assert!(body.get("model").is_none());
+                    assert_eq!(
+                        body["generationConfig"]["maxOutputTokens"],
+                        CAPABILITY_PROBE_MAX_OUTPUT_TOKENS
+                    );
+                    assert_eq!(
+                        body["generationConfig"]["responseMimeType"],
+                        "application/json"
+                    );
+                    assert_eq!(body["generationConfig"]["responseJsonSchema"], schema);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn capability_probe_schema_requires_only_the_boolean_result() {
+        let schema = capability_probe_schema();
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(schema["required"], json!(["ok"]));
+        assert_eq!(schema["properties"]["ok"]["type"], "boolean");
     }
 
     #[test]

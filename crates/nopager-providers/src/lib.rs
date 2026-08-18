@@ -346,6 +346,10 @@ pub enum ProviderError {
     Request(String),
     #[error("configured model is not available to this provider account: {0}")]
     ModelUnavailable(String),
+    #[error(
+        "selected model failed NoPager's structured-output capability probe ({model}): {reason}"
+    )]
+    CapabilityProbeFailed { model: String, reason: String },
     #[error("verified source context is unavailable; refusing to invent a repair patch")]
     InsufficientSourceContext,
     #[error("model provider returned invalid structured output: {0}")]
