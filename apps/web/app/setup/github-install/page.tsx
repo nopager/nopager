@@ -9,7 +9,9 @@ export default function GitHubInstallCallbackPage() {
     const params = new URLSearchParams(window.location.search);
     const installationId = params.get("installation_id");
     if (!installationId || !/^\d+$/.test(installationId) || !window.opener) {
-      setStatus("NoPager could not read the GitHub installation. Close this window and try again.");
+      setStatus(
+        "NoPager could not read the GitHub installation. Close this window and try again.",
+      );
       return;
     }
     window.opener.postMessage(
