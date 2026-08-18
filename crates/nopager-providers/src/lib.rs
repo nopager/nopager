@@ -33,6 +33,8 @@ pub struct DiagnosisInput {
     pub health_failure: Value,
     #[serde(serialize_with = "serialize_relevant_files")]
     pub relevant_files: Vec<SourceFile>,
+    #[serde(skip)]
+    pub verified_repair_files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -160,6 +162,8 @@ pub struct DiagnosisResult {
     pub risk_level: RiskLevel,
     pub validation_plan: Vec<String>,
     pub rollback_plan: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verified_repair_files: Vec<String>,
 }
 
 impl DiagnosisResult {
@@ -176,6 +180,9 @@ impl DiagnosisResult {
         for path in &self.affected_files {
             validate_relative_path(path)?;
         }
+        for path in &self.verified_repair_files {
+            validate_repair_path(path)?;
+        }
         if self.validation_plan.is_empty() || self.rollback_plan.trim().is_empty() {
             return Err(OutputValidationError::MissingSafetyPlan);
         }
@@ -184,9 +191,11 @@ impl DiagnosisResult {
 
     #[must_use]
     pub fn has_verified_source_context(&self) -> bool {
-        self.evidence.iter().any(|evidence| {
-            evidence.source == VERIFIED_GITHUB_DIFF_SOURCE && !evidence.finding.trim().is_empty()
-        })
+        !self.verified_repair_files.is_empty()
+            && self.evidence.iter().any(|evidence| {
+                evidence.source == VERIFIED_GITHUB_DIFF_SOURCE
+                    && !evidence.finding.trim().is_empty()
+            })
     }
 }
 
@@ -238,6 +247,26 @@ impl RepairProposal {
         }
         Ok(())
     }
+
+    pub fn validate_against_verified_source(
+        &self,
+        diagnosis: &DiagnosisResult,
+    ) -> Result<(), OutputValidationError> {
+        if diagnosis.verified_repair_files.is_empty() {
+            return Err(OutputValidationError::MissingVerifiedRepairSurface);
+        }
+        for path in &self.changed_files {
+            let normalized = path.replace('\\', "/");
+            let verified = diagnosis
+                .verified_repair_files
+                .iter()
+                .any(|allowed| allowed.replace('\\', "/") == normalized);
+            if !verified {
+                return Err(OutputValidationError::UnverifiedRepairPath(path.to_owned()));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -261,13 +290,15 @@ fn validate_relative_path(path: &str) -> Result<(), OutputValidationError> {
         || normalized.starts_with('/')
         || normalized.contains("../")
         || normalized.contains(':')
+        || path.contains('\\')
+        || path.chars().any(char::is_control)
     {
         return Err(OutputValidationError::UnsafePath(path.to_owned()));
     }
     Ok(())
 }
 
-fn validate_repair_path(path: &str) -> Result<(), OutputValidationError> {
+pub(crate) fn validate_repair_path(path: &str) -> Result<(), OutputValidationError> {
     validate_relative_path(path)?;
     let normalized = path.replace('\\', "/").to_ascii_lowercase();
     let file_name = normalized.rsplit('/').next().unwrap_or(&normalized);
@@ -322,6 +353,10 @@ pub enum OutputValidationError {
     MissingSafetyPlan,
     #[error("model patch is empty, too large, or has no changed files")]
     InvalidPatch,
+    #[error("verified GitHub evidence did not identify any safe repairable files")]
+    MissingVerifiedRepairSurface,
+    #[error("model attempted to modify a file outside verified source evidence: {0}")]
+    UnverifiedRepairPath(String),
 }
 
 #[derive(Debug, Error)]
@@ -355,6 +390,7 @@ mod tests {
             risk_level: RiskLevel::Low,
             validation_plan: vec!["run checkout tests".to_owned()],
             rollback_plan: "restore the known-good deployment".to_owned(),
+            verified_repair_files: Vec::new(),
         }
     }
 
@@ -403,12 +439,49 @@ mod tests {
             source: VERIFIED_GITHUB_DIFF_SOURCE.to_owned(),
             finding: "FILE: src/checkout.rs\n@@ -1 +1 @@".to_owned(),
         });
+        assert!(!diagnosis.has_verified_source_context());
+        diagnosis.verified_repair_files = vec!["src/checkout.rs".to_owned()];
         assert!(diagnosis.has_verified_source_context());
     }
 
     #[test]
     fn permits_normal_application_code_repairs() {
         assert_eq!(valid_repair("src/login.ts").validate(), Ok(()));
+    }
+
+    #[test]
+    fn repair_must_stay_inside_structured_verified_source_surface() {
+        let mut diagnosis = valid_diagnosis();
+        diagnosis.evidence.push(Evidence {
+            source: VERIFIED_GITHUB_DIFF_SOURCE.to_owned(),
+            finding: "FILE: src/checkout.rs\n@@ -1 +1 @@".to_owned(),
+        });
+        diagnosis.verified_repair_files = vec!["src/checkout.rs".to_owned()];
+
+        assert_eq!(
+            valid_repair("src/checkout.rs").validate_against_verified_source(&diagnosis),
+            Ok(())
+        );
+        assert_eq!(
+            valid_repair("src/unrelated.rs").validate_against_verified_source(&diagnosis),
+            Err(OutputValidationError::UnverifiedRepairPath(
+                "src/unrelated.rs".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn repair_surface_rejects_missing_or_unsafe_provenance() {
+        let mut diagnosis = valid_diagnosis();
+        assert_eq!(
+            valid_repair("src/checkout.rs").validate_against_verified_source(&diagnosis),
+            Err(OutputValidationError::MissingVerifiedRepairSurface)
+        );
+        diagnosis.verified_repair_files = vec!["src/evil\nname.rs".to_owned()];
+        assert!(matches!(
+            diagnosis.validate(),
+            Err(OutputValidationError::UnsafePath(_))
+        ));
     }
 
     #[test]
@@ -452,6 +525,7 @@ mod tests {
                     content: "c".repeat(MAX_SOURCE_FILE_CHARS + 100),
                 })
                 .collect(),
+            verified_repair_files: Vec::new(),
         };
 
         let serialized = serde_json::to_value(&input).expect("serialize bounded model input");
