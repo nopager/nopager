@@ -212,22 +212,33 @@ pub async fn check_http(
     let port = url
         .port_or_known_default()
         .ok_or(HttpCheckError::UnsupportedPort)?;
-    let mut builder = reqwest::Client::builder()
-        .timeout(timeout)
-        .redirect(reqwest::redirect::Policy::none());
+    let started = Instant::now();
+    let mut builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
     if url
         .host()
         .is_some_and(|value| matches!(value, Host::Domain(_)))
     {
-        let resolved: Vec<SocketAddr> = tokio::net::lookup_host((host, port)).await?.collect();
+        let dns_timeout = timeout.min(Duration::from_secs(5));
+        let resolved: Vec<SocketAddr> =
+            match tokio::time::timeout(dns_timeout, tokio::net::lookup_host((host, port))).await {
+                Ok(Ok(addresses)) => addresses.collect(),
+                Ok(Err(_)) => return Ok(failed_observation(started, "dns")),
+                Err(_) => return Ok(failed_observation(started, "dns_timeout")),
+            };
         validate_resolved_addresses(resolved.iter().map(SocketAddr::ip))?;
         // Pin the connection to the addresses we just validated. This prevents
         // a second DNS resolution from turning the validation/request gap into
         // a DNS-rebinding SSRF bypass.
         builder = builder.resolve_to_addrs(host, &resolved);
     }
-    let client = builder.build()?;
-    let started = Instant::now();
+    let remaining = timeout.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        return Ok(failed_observation(started, "timeout"));
+    }
+    let client = builder
+        .connect_timeout(remaining.min(Duration::from_secs(5)))
+        .timeout(remaining)
+        .build()?;
     let mut request = client.get(url.clone());
     // Vercel preview deployments are frequently protected. Vercel's official
     // automation bypass is intentionally injected only for *.vercel.app and
@@ -250,16 +261,23 @@ pub async fn check_http(
                 error_class: (status != expected_status).then_some("unexpected_status"),
             })
         }
-        Err(error) => Ok(HttpHealthObservation {
-            success: false,
-            status_code: None,
-            latency_ms: started.elapsed().as_millis(),
-            error_class: Some(if error.is_timeout() {
+        Err(error) => Ok(failed_observation(
+            started,
+            if error.is_timeout() {
                 "timeout"
             } else {
                 "connection"
-            }),
-        }),
+            },
+        )),
+    }
+}
+
+fn failed_observation(started: Instant, error_class: &'static str) -> HttpHealthObservation {
+    HttpHealthObservation {
+        success: false,
+        status_code: None,
+        latency_ms: started.elapsed().as_millis(),
+        error_class: Some(error_class),
     }
 }
 
@@ -275,8 +293,6 @@ pub enum HttpCheckError {
     UnsafeUrl(#[from] UrlSafetyError),
     #[error("health check URL has no supported port")]
     UnsupportedPort,
-    #[error(transparent)]
-    Dns(#[from] std::io::Error),
     #[error(transparent)]
     Client(#[from] reqwest::Error),
 }
@@ -358,6 +374,14 @@ mod tests {
             ]),
             Err(UrlSafetyError::NonPublicTarget)
         );
+    }
+
+    #[test]
+    fn failed_observations_preserve_failure_class() {
+        let observation = failed_observation(Instant::now(), "dns");
+        assert!(!observation.success);
+        assert_eq!(observation.status_code, None);
+        assert_eq!(observation.error_class, Some("dns"));
     }
 
     #[test]
