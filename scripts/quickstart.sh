@@ -126,13 +126,52 @@ web_port=${web_port:-3000}
 api_port=$(read_env NOPAGER_API_PORT)
 api_port=${api_port:-8080}
 
+image_tag=$(read_env NOPAGER_IMAGE_TAG)
+source_is_clean=0
+if [ -z "$image_tag" ] && command -v git >/dev/null 2>&1 && [ -d .git ]; then
+  git_sha=$(git rev-parse HEAD 2>/dev/null || true)
+  git_changes=$(git status --porcelain --untracked-files=normal 2>/dev/null || true)
+  if [ -n "$git_sha" ] && [ -z "$git_changes" ]; then
+    image_tag="sha-$git_sha"
+    source_is_clean=1
+  fi
+fi
+
+if [ -n "$image_tag" ]; then
+  export NOPAGER_IMAGE_TAG="$image_tag"
+fi
+
 docker compose config --quiet || fail "Docker Compose configuration is invalid."
 
-printf 'Building and starting NoPager...\n'
-if ! docker compose up -d --build; then
-  docker compose ps >&2 || true
-  docker compose logs --no-color --tail=200 server worker web postgres >&2 || true
-  fail "Docker Compose failed to start NoPager."
+use_prebuilt=0
+if [ -n "$image_tag" ]; then
+  printf 'Checking for prebuilt NoPager images (%s)...\n' "$image_tag"
+  if docker compose pull server worker web; then
+    use_prebuilt=1
+    printf 'Using prebuilt NoPager images for this exact revision.\n'
+  elif [ "$source_is_clean" -eq 1 ]; then
+    printf 'Prebuilt images are not available for this revision; building locally instead.\n' >&2
+  else
+    printf 'Configured prebuilt images are unavailable; building locally instead.\n' >&2
+  fi
+else
+  printf 'Local source changes detected (or Git metadata unavailable); building NoPager locally.\n'
+fi
+
+if [ "$use_prebuilt" -eq 1 ]; then
+  printf 'Starting NoPager...\n'
+  if ! docker compose up -d --no-build; then
+    docker compose ps >&2 || true
+    docker compose logs --no-color --tail=200 server worker web postgres >&2 || true
+    fail "Docker Compose failed to start NoPager from prebuilt images."
+  fi
+else
+  printf 'Building and starting NoPager...\n'
+  if ! docker compose up -d --build; then
+    docker compose ps >&2 || true
+    docker compose logs --no-color --tail=200 server worker web postgres >&2 || true
+    fail "Docker Compose failed to build or start NoPager."
+  fi
 fi
 
 printf 'Waiting for API and web console readiness...\n'
