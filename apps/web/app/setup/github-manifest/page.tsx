@@ -10,7 +10,9 @@ export default function GitHubManifestCallbackPage() {
     const code = params.get("code");
     const state = params.get("state");
     if (!code || !state || !window.opener) {
-      setStatus("NoPager could not complete the GitHub App registration. Close this window and try again.");
+      setStatus(
+        "NoPager could not complete the GitHub App registration. Close this window and try again.",
+      );
       return;
     }
     window.opener.postMessage(
