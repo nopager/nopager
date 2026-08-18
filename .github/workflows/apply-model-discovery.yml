@@ -64,17 +64,36 @@ jobs:
               1,
           )
           http.write_text(rendered)
+
+          needle = 'let expected_auth = expected_auth.into();'
+          matches = []
+          for root in (Path('apps'), Path('crates')):
+              for rust_file in root.rglob('*.rs'):
+                  candidate = rust_file.read_text()
+                  count = candidate.count(needle)
+                  if count:
+                      matches.extend([rust_file] * count)
+          if len(matches) != 1:
+              raise SystemExit(
+                  f'expected exactly one transformed auth helper, found {len(matches)}: {matches}'
+              )
+          target = matches[0]
+          rendered = target.read_text()
+          target.write_text(
+              rendered.replace(
+                  needle,
+                  'let expected_auth: secrecy::SecretString = expected_auth.into();',
+                  1,
+              )
+          )
+          print(f'fixed transformed auth helper in {target}')
           PY
-      - name: Format inspect and validate model discovery
+      - name: Format and validate model discovery
         run: |
           rustup toolchain install 1.92.0 --profile minimal --component clippy --component rustfmt
           rustup override set 1.92.0
           pnpm exec prettier --write apps/web/app/setup/page.tsx
           cargo fmt --all
-          echo '--- expected_auth matches after transform ---'
-          grep -R -n -C 12 'expected_auth' apps crates || true
-          echo '--- spawn matches near provider/server tests ---'
-          grep -R -n -C 8 'tokio::spawn' apps/server crates/nopager-providers || true
           pnpm format:check
           pnpm lint
           pnpm typecheck
