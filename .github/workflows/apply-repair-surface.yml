@@ -36,8 +36,8 @@ jobs:
               '''        if self.validation_commands.is_empty() {\n            return Err(OutputValidationError::MissingSafetyPlan);\n        }\n        Ok(())\n    }\n\n    pub fn validate_against_verified_source(\n        &self,\n        diagnosis: &DiagnosisResult,\n    ) -> Result<(), OutputValidationError> {\n        let allowed = diagnosis.verified_repair_files();\n        if allowed.is_empty() {\n            return Err(OutputValidationError::MissingVerifiedRepairSurface);\n        }\n        for path in &self.changed_files {\n            let normalized = path.replace('\\\\', "/");\n            if !allowed.contains(&normalized) {\n                return Err(OutputValidationError::UnverifiedRepairPath(path.to_owned()));\n            }\n        }\n        Ok(())\n    }\n}\n''',
           ))
           replacements.append((
-              '''        || normalized.contains(":")\n    {\n''',
-              '''        || normalized.contains(":")\n        || path.chars().any(char::is_control)\n    {\n''',
+              '''        || normalized.contains(':')\n    {\n''',
+              '''        || normalized.contains(':')\n        || path.chars().any(char::is_control)\n    {\n''',
           ))
           replacements.append((
               '''    #[error("model patch is empty, too large, or has no changed files")]\n    InvalidPatch,\n}\n''',
