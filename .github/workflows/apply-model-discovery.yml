@@ -64,29 +64,6 @@ jobs:
               1,
           )
           http.write_text(rendered)
-
-          needle = 'let expected_auth = expected_auth.into();'
-          matches = []
-          for root in (Path('apps'), Path('crates')):
-              for rust_file in root.rglob('*.rs'):
-                  candidate = rust_file.read_text()
-                  count = candidate.count(needle)
-                  if count:
-                      matches.extend([rust_file] * count)
-          if len(matches) != 1:
-              raise SystemExit(
-                  f'expected exactly one transformed auth helper, found {len(matches)}: {matches}'
-              )
-          target = matches[0]
-          rendered = target.read_text()
-          target.write_text(
-              rendered.replace(
-                  needle,
-                  'let expected_auth: secrecy::SecretString = expected_auth.into();',
-                  1,
-              )
-          )
-          print(f'fixed transformed auth helper in {target}')
           PY
       - name: Format and validate model discovery
         run: |
