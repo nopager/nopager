@@ -35,15 +35,8 @@ jobs:
 
           server = Path('apps/server/src/main.rs')
           text = server.read_text()
-          multiline = '''        .route(
-              "/api/v1/setup/test/provider",
-              post(test_provider_connection),
-          )
-          .route("/api/v1/setup/test/health", post(test_health_connection))
-          '''
-          singleline = '''        .route("/api/v1/setup/test/provider", post(test_provider_connection))
-          .route("/api/v1/setup/test/health", post(test_health_connection))
-          '''
+          multiline = '        .route(\n            "/api/v1/setup/test/provider",\n            post(test_provider_connection),\n        )\n        .route("/api/v1/setup/test/health", post(test_health_connection))\n'
+          singleline = '        .route("/api/v1/setup/test/provider", post(test_provider_connection))\n        .route("/api/v1/setup/test/health", post(test_health_connection))\n'
           if text.count(multiline) == 1:
               server.write_text(text.replace(multiline, singleline, 1))
           elif text.count(singleline) != 1:
