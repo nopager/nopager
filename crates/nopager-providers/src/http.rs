@@ -127,6 +127,7 @@ impl HttpProvider {
             return Err(ProviderError::Authentication);
         }
         let http = Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(120))
             .build()
             .map_err(|error| ProviderError::Request(error.to_string()))?;
