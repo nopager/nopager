@@ -104,7 +104,8 @@ export default function SetupPage() {
       };
 
       if (payload.type === "nopager-github-manifest") {
-        if (manifestPopup.current && event.source !== manifestPopup.current) return;
+        if (manifestPopup.current && event.source !== manifestPopup.current)
+          return;
         if (
           typeof payload.code !== "string" ||
           typeof payload.state !== "string" ||
@@ -145,12 +146,15 @@ export default function SetupPage() {
           typeof payload.installationId !== "string" ||
           !/^\d+$/.test(payload.installationId)
         ) {
-          setError("GitHub returned an invalid installation ID. Try the install step again.");
+          setError(
+            "GitHub returned an invalid installation ID. Try the install step again.",
+          );
           return;
         }
+        const installationId = payload.installationId;
         setData((current) => ({
           ...current,
-          githubInstallationId: payload.installationId as string,
+          githubInstallationId: installationId,
         }));
         setError("");
       }
@@ -173,7 +177,9 @@ export default function SetupPage() {
       window.location.protocol !== "https:" &&
       !["localhost", "127.0.0.1", "::1"].includes(window.location.hostname)
     ) {
-      setError("Use HTTPS for remote NoPager setup before creating the GitHub App.");
+      setError(
+        "Use HTTPS for remote NoPager setup before creating the GitHub App.",
+      );
       return;
     }
 
