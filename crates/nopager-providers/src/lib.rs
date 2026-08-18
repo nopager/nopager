@@ -56,17 +56,28 @@ fn serialize_recent_commits<S>(value: &[CommitContext], serializer: S) -> Result
 where
     S: Serializer,
 {
-    value.iter().take(MAX_RECENT_COMMITS).collect::<Vec<_>>().serialize(serializer)
+    value
+        .iter()
+        .take(MAX_RECENT_COMMITS)
+        .collect::<Vec<_>>()
+        .serialize(serializer)
 }
 
 fn serialize_relevant_files<S>(value: &[SourceFile], serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    value.iter().take(MAX_RELEVANT_FILES).collect::<Vec<_>>().serialize(serializer)
+    value
+        .iter()
+        .take(MAX_RELEVANT_FILES)
+        .collect::<Vec<_>>()
+        .serialize(serializer)
 }
 
-fn serialize_optional_stack_trace<S>(value: &Option<String>, serializer: S) -> Result<S::Ok, S::Error>
+fn serialize_optional_stack_trace<S>(
+    value: &Option<String>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
@@ -452,7 +463,12 @@ mod tests {
             serialized["relevantFiles"].as_array().unwrap().len(),
             MAX_RELEVANT_FILES
         );
-        assert!(serialized["stackTrace"].as_str().unwrap().contains(TRUNCATED));
+        assert!(
+            serialized["stackTrace"]
+                .as_str()
+                .unwrap()
+                .contains(TRUNCATED)
+        );
         assert!(
             serialized["deployment"]["body"]
                 .as_str()
@@ -460,10 +476,7 @@ mod tests {
                 .contains(TRUNCATED)
         );
         assert_eq!(
-            serialized["deployment"]["events"]
-                .as_array()
-                .unwrap()
-                .len(),
+            serialized["deployment"]["events"].as_array().unwrap().len(),
             MAX_CONTEXT_ARRAY_ITEMS + 1
         );
         assert!(
