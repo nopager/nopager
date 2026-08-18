@@ -22,163 +22,40 @@ jobs:
           corepack enable
           corepack prepare pnpm@10.32.1 --activate
       - run: pnpm install --frozen-lockfile
-      - name: Apply dynamic model discovery
+      - name: Apply saved model discovery transform
         run: |
           python - <<'PY'
           from pathlib import Path
-
-          def replace_once(path, old, new, label):
-              text = path.read_text()
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(f'{label}: expected once, found {count}')
-              path.write_text(text.replace(old, new, 1))
+          import textwrap
 
           providers = Path('crates/nopager-providers/src/lib.rs')
-          replace_once(
-              providers,
-              '''mod http;\npub use http::{AnthropicProvider, GeminiProvider, OpenAiProvider};\n''',
-              '''mod http;\npub use http::{AnthropicProvider, GeminiProvider, OpenAiProvider};\n\npub async fn discover_available_models(\n    provider: &str,\n    api_key: secrecy::SecretString,\n) -> Result<Vec<AvailableModel>, ProviderError> {\n    http::discover_available_models(provider, api_key).await\n}\n''',
-              'provider discovery export',
-          )
-          replace_once(
-              providers,
-              '''#[async_trait]\npub trait ModelProvider: Send + Sync {\n''',
-              '''#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]\n#[serde(rename_all = "camelCase")]\npub struct AvailableModel {\n    pub id: String,\n    pub display_name: String,\n}\n\n#[async_trait]\npub trait ModelProvider: Send + Sync {\n''',
-              'available model type',
-          )
-          replace_once(
-              providers,
-              '''    #[error("model provider request failed: {0}")]\n    Request(String),\n''',
-              '''    #[error("model provider request failed: {0}")]\n    Request(String),\n    #[error("configured model is not available to this provider account: {0}")]\n    ModelUnavailable(String),\n''',
-              'model unavailable error',
-          )
-
-          http = Path('crates/nopager-providers/src/http.rs')
-          replace_once(
-              http,
-              '''use async_trait::async_trait;\n''',
-              '''use std::collections::BTreeSet;\n\nuse async_trait::async_trait;\n''',
-              'model discovery set import',
-          )
-          replace_once(
-              http,
-              '''    DiagnosisInput, DiagnosisResult, Evidence, ModelProvider, ProviderError, RepairInput,\n    RepairProposal, VERIFIED_GITHUB_DIFF_SOURCE,\n''',
-              '''    AvailableModel, DiagnosisInput, DiagnosisResult, Evidence, ModelProvider, ProviderError,\n    RepairInput, RepairProposal, VERIFIED_GITHUB_DIFF_SOURCE,\n''',
-              'available model import',
-          )
-          replace_once(
-              http,
-              '''const REDACTED_PRIVATE_KEY: &str = "[REDACTED_PRIVATE_KEY_BY_NOPAGER]";\n''',
-              '''const REDACTED_PRIVATE_KEY: &str = "[REDACTED_PRIVATE_KEY_BY_NOPAGER]";\nconst MAX_DISCOVERED_MODELS: usize = 200;\n''',
-              'model discovery bound',
-          )
-          replace_once(
-              http,
-              '''provider!(\n    GeminiProvider,\n    "gemini",\n    Gemini,\n    "https://generativelanguage.googleapis.com/"\n);\n\nimpl HttpProvider {\n''',
-              '''provider!(\n    GeminiProvider,\n    "gemini",\n    Gemini,\n    "https://generativelanguage.googleapis.com/"\n);\n\npub(crate) async fn discover_available_models(\n    provider: &str,\n    api_key: SecretString,\n) -> Result<Vec<AvailableModel>, ProviderError> {\n    let (backend, base_url) = match provider {\n        "openai" => (\n            Backend::OpenAi,\n            Url::parse("https://api.openai.com/v1/").expect("constant URL"),\n        ),\n        "anthropic" => (\n            Backend::Anthropic,\n            Url::parse("https://api.anthropic.com/v1/").expect("constant URL"),\n        ),\n        "gemini" => (\n            Backend::Gemini,\n            Url::parse("https://generativelanguage.googleapis.com/").expect("constant URL"),\n        ),\n        _ => return Err(ProviderError::Request("unsupported provider".to_owned())),\n    };\n    HttpProvider::for_discovery(backend, api_key, base_url)?\n        .list_models()\n        .await\n}\n\nimpl HttpProvider {\n''',
-              'model discovery entrypoint',
-          )
-          replace_once(
-              http,
-              '''    fn request(&self, method: Method, path: &str) -> Result<RequestBuilder, ProviderError> {\n''',
-              '''    fn for_discovery(\n        backend: Backend,\n        api_key: SecretString,\n        base_url: Url,\n    ) -> Result<Self, ProviderError> {\n        if api_key.expose_secret().trim().is_empty() {\n            return Err(ProviderError::Authentication);\n        }\n        let http = Client::builder()\n            .connect_timeout(std::time::Duration::from_secs(10))\n            .timeout(std::time::Duration::from_secs(30))\n            .build()\n            .map_err(|error| ProviderError::Request(error.to_string()))?;\n        Ok(Self {\n            backend,\n            http,\n            api_key,\n            model: String::new(),\n            base_url,\n        })\n    }\n\n    fn request(&self, method: Method, path: &str) -> Result<RequestBuilder, ProviderError> {\n''',
-              'model discovery client',
-          )
-          replace_once(
-              http,
-              '''    async fn test_connection(&self) -> Result<(), ProviderError> {\n        let path = match self.backend {\n            Backend::OpenAi | Backend::Anthropic => "models",\n            Backend::Gemini => "v1beta/models",\n        };\n        check(\n            self.request(Method::GET, path)?\n                .send()\n                .await\n                .map_err(request_error)?,\n        )\n        .await\n    }\n''',
-              '''    async fn test_connection(&self) -> Result<(), ProviderError> {\n        let models = self.list_models().await?;\n        if models.iter().any(|model| model.id == self.model) {\n            Ok(())\n        } else {\n            Err(ProviderError::ModelUnavailable(self.model.clone()))\n        }\n    }\n\n    async fn list_models(&self) -> Result<Vec<AvailableModel>, ProviderError> {\n        let path = match self.backend {\n            Backend::OpenAi => "models",\n            Backend::Anthropic => "models?limit=100",\n            Backend::Gemini => "v1beta/models?pageSize=1000",\n        };\n        let response = decode_json(\n            self.request(Method::GET, path)?\n                .send()\n                .await\n                .map_err(request_error)?,\n        )\n        .await?;\n        parse_available_models(self.backend, &response)\n    }\n''',
-              'model listing and connection validation',
-          )
-          replace_once(
-              http,
-              '''fn request_error(error: reqwest::Error) -> ProviderError {\n''',
-              '''fn parse_available_models(\n    backend: Backend,\n    response: &Value,\n) -> Result<Vec<AvailableModel>, ProviderError> {\n    let items = match backend {\n        Backend::OpenAi | Backend::Anthropic => response.get("data"),\n        Backend::Gemini => response.get("models"),\n    }\n    .and_then(Value::as_array)\n    .ok_or(ProviderError::Decode)?;\n\n    let mut seen = BTreeSet::new();\n    let mut models = Vec::new();\n    for item in items {\n        if models.len() >= MAX_DISCOVERED_MODELS {\n            break;\n        }\n        if matches!(backend, Backend::Gemini) {\n            let supports_generate = item\n                .get("supportedGenerationMethods")\n                .or_else(|| item.get("supportedActions"))\n                .and_then(Value::as_array)\n                .is_some_and(|methods| {\n                    methods\n                        .iter()\n                        .filter_map(Value::as_str)\n                        .any(|method| method == "generateContent")\n                });\n            if !supports_generate {\n                continue;\n            }\n        }\n        let raw_id = match backend {\n            Backend::OpenAi | Backend::Anthropic => item.get("id"),\n            Backend::Gemini => item.get("name"),\n        }\n        .and_then(Value::as_str)\n        .unwrap_or_default();\n        let id = raw_id.strip_prefix("models/").unwrap_or(raw_id).trim();\n        if id.is_empty() || id.len() > 256 || !seen.insert(id.to_owned()) {\n            continue;\n        }\n        let display_name = item\n            .get("display_name")\n            .or_else(|| item.get("displayName"))\n            .and_then(Value::as_str)\n            .filter(|value| !value.trim().is_empty())\n            .unwrap_or(id)\n            .chars()\n            .take(256)\n            .collect();\n        models.push(AvailableModel {\n            id: id.to_owned(),\n            display_name,\n        });\n    }\n    Ok(models)\n}\n\nfn request_error(error: reqwest::Error) -> ProviderError {\n''',
-              'model response parser',
-          )
-          replace_once(
-              http,
-              '''    #[test]\n    fn strict_schemas_reject_extra_fields() {\n''',
-              '''    #[test]\n    fn parses_provider_model_lists_and_filters_gemini_generation_models() {\n        let openai = json!({"data":[{"id":"gpt-example"},{"id":"gpt-example"}]});\n        let anthropic = json!({"data":[{"id":"claude-example","display_name":"Claude Example"}]});\n        let gemini = json!({\n            "models":[\n                {"name":"models/gemini-text","displayName":"Gemini Text","supportedGenerationMethods":["generateContent"]},\n                {"name":"models/gemini-embed","displayName":"Gemini Embed","supportedGenerationMethods":["embedContent"]}\n            ]\n        });\n\n        assert_eq!(\n            parse_available_models(Backend::OpenAi, &openai).unwrap(),\n            vec![AvailableModel { id: "gpt-example".into(), display_name: "gpt-example".into() }]\n        );\n        assert_eq!(\n            parse_available_models(Backend::Anthropic, &anthropic).unwrap(),\n            vec![AvailableModel { id: "claude-example".into(), display_name: "Claude Example".into() }]\n        );\n        assert_eq!(\n            parse_available_models(Backend::Gemini, &gemini).unwrap(),\n            vec![AvailableModel { id: "gemini-text".into(), display_name: "Gemini Text".into() }]\n        );\n    }\n\n    #[test]\n    fn model_list_parser_is_bounded_and_rejects_malformed_shapes() {\n        let response = json!({\n            "data": (0..(MAX_DISCOVERED_MODELS + 50))\n                .map(|index| json!({"id": format!("model-{index}")}))\n                .collect::<Vec<_>>()\n        });\n        assert_eq!(\n            parse_available_models(Backend::OpenAi, &response)\n                .unwrap()\n                .len(),\n            MAX_DISCOVERED_MODELS\n        );\n        assert!(matches!(\n            parse_available_models(Backend::OpenAi, &json!({"models": []})),\n            Err(ProviderError::Decode)\n        ));\n    }\n\n    #[test]\n    fn strict_schemas_reject_extra_fields() {\n''',
-              'model parser tests',
-          )
+          if 'pub async fn discover_available_models' in providers.read_text():
+              print('Provider model discovery already applied')
+              raise SystemExit(0)
 
           server = Path('apps/server/src/main.rs')
-          replace_once(
-              server,
-              '''use nopager_providers::{AnthropicProvider, GeminiProvider, ModelProvider, OpenAiProvider};\n''',
-              '''use nopager_providers::{\n    AnthropicProvider, GeminiProvider, ModelProvider, OpenAiProvider, discover_available_models,\n};\n''',
-              'server discovery import',
+          text = server.read_text()
+          multiline = '''        .route(
+              "/api/v1/setup/test/provider",
+              post(test_provider_connection),
           )
-          replace_once(
-              server,
-              '''struct ProviderConnectionRequest {\n    provider: String,\n    api_key: String,\n    model: String,\n}\n''',
-              '''struct ProviderConnectionRequest {\n    provider: String,\n    api_key: String,\n    model: String,\n}\n\n#[derive(Deserialize)]\n#[serde(rename_all = "camelCase")]\nstruct ProviderModelsRequest {\n    provider: String,\n    api_key: String,\n}\n''',
-              'provider models request',
-          )
-          replace_once(
-              server,
-              '''async fn test_provider_connection(\n''',
-              '''async fn discover_provider_models(\n    State(state): State<ServerState>,\n    headers: HeaderMap,\n    Json(request): Json<ProviderModelsRequest>,\n) -> (StatusCode, Json<Value>) {\n    if !authorized(&state, &headers).await {\n        return api_error(StatusCode::UNAUTHORIZED, "unauthorized");\n    }\n    if !matches!(request.provider.as_str(), "openai" | "anthropic" | "gemini") {\n        return api_error(StatusCode::BAD_REQUEST, "unsupported_provider");\n    }\n    if request.api_key.trim().is_empty() {\n        return api_error(StatusCode::BAD_REQUEST, "provider_api_key_required");\n    }\n    match discover_available_models(&request.provider, SecretString::from(request.api_key)).await {\n        Ok(models) if !models.is_empty() => (\n            StatusCode::OK,\n            Json(json!({ "models": models })),\n        ),\n        Ok(_) => api_error(StatusCode::UNPROCESSABLE_ENTITY, "provider_models_empty"),\n        Err(error) => {\n            tracing::warn!(%error, "model provider discovery failed");\n            api_error(StatusCode::UNPROCESSABLE_ENTITY, "provider_connection_failed")\n        }\n    }\n}\n\nasync fn test_provider_connection(\n''',
-              'provider model discovery handler',
-          )
-          replace_once(
-              server,
-              '''        .route("/api/v1/setup/test/provider", post(test_provider_connection))\n        .route("/api/v1/setup/test/health", post(test_health_connection))\n''',
-              '''        .route("/api/v1/setup/test/provider", post(test_provider_connection))\n        .route(\n            "/api/v1/setup/models",\n            post(discover_provider_models),\n        )\n        .route("/api/v1/setup/test/health", post(test_health_connection))\n''',
-              'provider model discovery route',
-          )
+          .route("/api/v1/setup/test/health", post(test_health_connection))
+          '''
+          singleline = '''        .route("/api/v1/setup/test/provider", post(test_provider_connection))
+          .route("/api/v1/setup/test/health", post(test_health_connection))
+          '''
+          if text.count(multiline) == 1:
+              server.write_text(text.replace(multiline, singleline, 1))
+          elif text.count(singleline) != 1:
+              raise SystemExit('provider setup route shape is not recognized')
 
-          page = Path('apps/web/app/setup/page.tsx')
-          replace_once(
-              page,
-              '''type ManifestDraft = {\n''',
-              '''type ProviderModel = {\n  id: string;\n  displayName: string;\n};\n\ntype ManifestDraft = {\n''',
-              'provider model UI type',
-          )
-          replace_once(
-              page,
-              '''  provider_connection_failed:\n    "The model provider rejected this connection. Check the API key and exact model ID supported by your provider account.",\n''',
-              '''  provider_connection_failed:\n    "The model provider rejected this connection. Check the API key and selected model, then try again.",\n  provider_api_key_required: "Enter your provider API key first.",\n  provider_models_empty:\n    "The provider connection worked but returned no usable models for this account. You can still enter a model ID manually.",\n''',
-              'model discovery UI errors',
-          )
-          replace_once(
-              page,
-              '''  const [healthDiscoveryMessage, setHealthDiscoveryMessage] = useState("");\n''',
-              '''  const [healthDiscoveryMessage, setHealthDiscoveryMessage] = useState("");\n  const [providerModels, setProviderModels] = useState<ProviderModel[]>([]);\n  const [loadingProviderModels, setLoadingProviderModels] = useState(false);\n  const [providerModelsMessage, setProviderModelsMessage] = useState("");\n''',
-              'model discovery UI state',
-          )
-          replace_once(
-              page,
-              '''  async function discoverHealth() {\n''',
-              '''  async function loadProviderModels() {\n    if (!data.providerApiKey.trim()) {\n      setError("Enter your provider API key first.");\n      return;\n    }\n    setLoadingProviderModels(true);\n    setProviderModels([]);\n    setProviderModelsMessage("");\n    setError("");\n    try {\n      const response = await fetch("/api/nopager/setup/models", {\n        method: "POST",\n        headers: { "content-type": "application/json" },\n        body: JSON.stringify({\n          provider: data.provider,\n          apiKey: data.providerApiKey,\n        }),\n      });\n      const result = await expectJson<{ models: ProviderModel[] }>(response);\n      setProviderModels(result.models);\n      setProviderModelsMessage(\n        `Loaded ${result.models.length} models available to this provider account.`,\n      );\n      if (result.models.length === 1 && !data.providerModel.trim()) {\n        update("providerModel", result.models[0].id);\n      }\n    } catch (reason) {\n      setError(message(reason));\n    } finally {\n      setLoadingProviderModels(false);\n    }\n  }\n\n  async function discoverHealth() {\n''',
-              'model discovery client action',
-          )
-          replace_once(
-              page,
-              '''          healthDiscoveryMessage,\n        )}\n''',
-              '''          healthDiscoveryMessage,\n          providerModels,\n          loadingProviderModels,\n          providerModelsMessage,\n          loadProviderModels,\n        )}\n''',
-              'model discovery field arguments',
-          )
-          replace_once(
-              page,
-              '''  healthDiscoveryMessage: string,\n) {\n''',
-              '''  healthDiscoveryMessage: string,\n  providerModels: ProviderModel[],\n  loadingProviderModels: boolean,\n  providerModelsMessage: string,\n  loadProviderModels: () => void,\n) {\n''',
-              'model discovery field signature',
-          )
-          replace_once(
-              page,
-              '''            onChange={(event) => {\n              update("provider", event.target.value as SetupData["provider"]);\n              update("providerModel", "");\n            }}\n''',
-              '''            onChange={(event) => {\n              update("provider", event.target.value as SetupData["provider"]);\n              update("providerModel", "");\n              setProviderModels([]);\n            }}\n''',
-              'provider change clears model list',
-          )
-          replace_once(
-              page,
-              '''        <Input\n          label="Model ID"\n          value={data.providerModel}\n          onChange={(v) => update("providerModel", v)}\n          placeholder="Exact model ID from your provider"\n        />\n        <Input\n          full\n          label="API key"\n          type="password"\n          value={data.providerApiKey}\n          onChange={(v) => update("providerApiKey", v)}\n        />\n''',
-              '''        <Input\n          full\n          label="API key"\n          type="password"\n          value={data.providerApiKey}\n          onChange={(v) => {\n            update("providerApiKey", v);\n            setProviderModels([]);\n          }}\n        />\n        <div className="full">\n          <button\n            type="button"\n            className="secondary-button"\n            onClick={loadProviderModels}\n            disabled={loadingProviderModels || !data.providerApiKey.trim()}\n          >\n            {loadingProviderModels ? "Loading models…" : "Load available models"}\n          </button>\n          {providerModelsMessage && <small>{providerModelsMessage}</small>}\n        </div>\n        <label>\n          Model ID\n          <input\n            required\n            list="nopager-provider-models"\n            value={data.providerModel}\n            placeholder="Choose a discovered model or type an exact ID"\n            onChange={(event) => update("providerModel", event.target.value)}\n            autoComplete="off"\n          />\n          <datalist id="nopager-provider-models">\n            {providerModels.map((model) => (\n              <option key={model.id} value={model.id}>\n                {model.displayName}\n              </option>\n            ))}\n          </datalist>\n        </label>\n''',
-              'model discovery UI',
-          )
+          source = Path('.github/model-discovery-transform.source').read_text()
+          start_marker = "          python - <<'PY'\n"
+          end_marker = "\n          PY\n"
+          start = source.index(start_marker) + len(start_marker)
+          end = source.index(end_marker, start)
+          script = textwrap.dedent(source[start:end])
+          exec(compile(script, 'model-discovery-transform', 'exec'), {'__name__': '__main__'})
           PY
       - name: Format and validate model discovery
         run: |
@@ -191,7 +68,7 @@ jobs:
           pnpm typecheck
           cargo test -p nopager-providers -p nopager-server
           cargo clippy --workspace --all-targets -- -D warnings
-      - name: Commit model discovery
+      - name: Commit product changes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -200,6 +77,9 @@ jobs:
             crates/nopager-providers/src/http.rs \
             apps/server/src/main.rs \
             apps/web/app/setup/page.tsx
-          git diff --cached --quiet && { echo "No provider-model changes produced"; exit 1; }
+          if git diff --cached --quiet; then
+            echo "Model discovery product changes already committed"
+            exit 0
+          fi
           git commit -m "Discover provider models during setup"
           git push origin HEAD:${{ github.event.pull_request.head.ref }}
