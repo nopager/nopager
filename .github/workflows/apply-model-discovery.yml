@@ -63,18 +63,22 @@ jobs:
               '        Backend::OpenAi | Backend::Anthropic => {\n            item.get("id")\n        }\n        Backend::Gemini => item.get("name"),\n',
               1,
           )
+          old_auth = '        let expected_auth = expected_auth.into();\n'
+          if rendered.count(old_auth) != 1:
+              raise SystemExit(f'expected provider test auth conversion once, found {rendered.count(old_auth)}')
+          rendered = rendered.replace(
+              old_auth,
+              '        let expected_auth: SecretString = expected_auth.into();\n',
+              1,
+          )
           http.write_text(rendered)
           PY
-      - name: Format inspect and validate model discovery
+      - name: Format and validate model discovery
         run: |
           rustup toolchain install 1.92.0 --profile minimal --component clippy --component rustfmt
           rustup override set 1.92.0
           pnpm exec prettier --write apps/web/app/setup/page.tsx
           cargo fmt --all
-          echo '--- transformed provider 790-870 ---'
-          nl -ba crates/nopager-providers/src/http.rs | sed -n '790,870p'
-          echo '--- transformed provider serve helpers ---'
-          grep -n -C 14 'fn serve\|async fn serve\|tokio::spawn' crates/nopager-providers/src/http.rs || true
           pnpm format:check
           pnpm lint
           pnpm typecheck
