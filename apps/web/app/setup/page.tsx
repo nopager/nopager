@@ -26,6 +26,23 @@ type SetupData = {
   safetyMode: "safe" | "autopilot";
 };
 
+type GitHubMode = "automatic" | "manual";
+type ManifestStage = "idle" | "created" | "installed";
+
+type ManifestCredentials = {
+  appId: number;
+  privateKey: string;
+  webhookSecret: string;
+  appUrl: string;
+  slug: string | null;
+};
+
+type ManifestDraft = {
+  name: string;
+  repoOwner: string;
+  repoName: string;
+};
+
 const initial: SetupData = {
   username: "admin",
   password: "",
@@ -49,12 +66,23 @@ const initial: SetupData = {
 };
 
 const labels = ["Admin", "GitHub", "Vercel", "AI", "Production", "Safety"];
+const manifestStateKey = "nopager.githubManifest.state";
+const manifestCredentialsKey = "nopager.githubManifest.credentials";
+const manifestDraftKey = "nopager.githubManifest.draft";
 
 const setupErrors: Record<string, string> = {
   github_connection_failed:
     "GitHub could not authenticate this App. Check the App ID, Installation ID, and private-key PEM, then try again.",
   github_repository_not_accessible:
     "GitHub authentication worked, but this App cannot access the selected repository. Install the App on that repository and verify Contents and Pull requests permissions.",
+  github_manifest_exchange_failed:
+    "GitHub could not complete the App registration handshake. The temporary code may have expired or already been used. Start automatic GitHub setup again.",
+  github_manifest_exchange_unavailable:
+    "NoPager could not reach GitHub to finish App registration. Check network access from this self-hosted instance and retry.",
+  github_manifest_exchange_invalid_response:
+    "GitHub returned an incomplete App registration response. Start automatic GitHub setup again.",
+  invalid_github_manifest_code:
+    "The GitHub App registration callback was invalid. Start automatic GitHub setup again.",
   vercel_connection_failed:
     "Vercel could not authenticate this token. Check the token and Team ID, if your project belongs to a team.",
   vercel_project_not_accessible:
@@ -84,6 +112,9 @@ export default function SetupPage() {
   const [complete, setComplete] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [githubMode, setGitHubMode] = useState<GitHubMode>("automatic");
+  const [manifestStage, setManifestStage] = useState<ManifestStage>("idle");
+  const [manifestAppUrl, setManifestAppUrl] = useState("");
 
   useEffect(() => {
     fetch("/api/nopager/setup/status", { cache: "no-store" })
@@ -101,6 +132,112 @@ export default function SetupPage() {
         setComplete(status.appProtected && status.authenticated);
       })
       .catch((reason: unknown) => setError(message(reason)));
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function resumeManifestFlow() {
+      const params = new URLSearchParams(window.location.search);
+      const code = params.get("code");
+      const returnedState = params.get("state");
+      const installationId = params.get("installation_id");
+      const storedCredentials = readSessionJson<ManifestCredentials>(
+        manifestCredentialsKey,
+      );
+      const draft = readSessionJson<ManifestDraft>(manifestDraftKey);
+
+      if (code) {
+        const expectedState = sessionStorage.getItem(manifestStateKey);
+        if (!expectedState || !returnedState || expectedState !== returnedState) {
+          if (!cancelled) {
+            setError(
+              "GitHub App registration state did not match this setup session. Start automatic GitHub setup again.",
+            );
+            setStep(1);
+          }
+          clearManifestQuery();
+          return;
+        }
+
+        sessionStorage.removeItem(manifestStateKey);
+        if (!cancelled) {
+          setBusy(true);
+          setError("");
+          setStep(1);
+        }
+        try {
+          const response = await fetch("/api/github-manifest", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ code }),
+          });
+          const credentials = await expectJson<ManifestCredentials>(response);
+          sessionStorage.setItem(
+            manifestCredentialsKey,
+            JSON.stringify(credentials),
+          );
+          if (!cancelled) {
+            applyManifestCredentials(credentials, draft, null);
+            setManifestAppUrl(credentials.appUrl);
+            setManifestStage("created");
+            setGitHubMode("automatic");
+          }
+        } catch (reason) {
+          if (!cancelled) setError(message(reason));
+        } finally {
+          if (!cancelled) setBusy(false);
+          clearManifestQuery();
+        }
+        return;
+      }
+
+      if (installationId && storedCredentials) {
+        if (!/^\d+$/.test(installationId)) {
+          if (!cancelled) setError("GitHub returned an invalid installation ID.");
+          clearManifestQuery();
+          return;
+        }
+        if (!cancelled) {
+          applyManifestCredentials(storedCredentials, draft, installationId);
+          setManifestAppUrl(storedCredentials.appUrl);
+          setManifestStage("installed");
+          setGitHubMode("automatic");
+          setStep(1);
+        }
+        clearManifestQuery();
+        return;
+      }
+
+      if (storedCredentials && !cancelled) {
+        applyManifestCredentials(storedCredentials, draft, null);
+        setManifestAppUrl(storedCredentials.appUrl);
+        setManifestStage("created");
+        setGitHubMode("automatic");
+      }
+    }
+
+    function applyManifestCredentials(
+      credentials: ManifestCredentials,
+      draft: ManifestDraft | null,
+      installationId: string | null,
+    ) {
+      setData((current) => ({
+        ...current,
+        name: draft?.name || current.name,
+        repoOwner: draft?.repoOwner || current.repoOwner,
+        repoName: draft?.repoName || current.repoName,
+        githubAppId: String(credentials.appId),
+        githubPrivateKey: credentials.privateKey,
+        githubWebhookSecret: credentials.webhookSecret,
+        githubInstallationId: installationId ?? current.githubInstallationId,
+      }));
+    }
+
+    void resumeManifestFlow();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   function update<K extends keyof SetupData>(key: K, value: SetupData[K]) {
@@ -147,6 +284,85 @@ export default function SetupPage() {
     }));
   }
 
+  function startGitHubManifest() {
+    if (!data.repoOwner.trim() || !data.repoName.trim()) {
+      setError("Enter the repository owner and repository name first.");
+      return;
+    }
+    setError("");
+    const state = randomHex(24);
+    const draft: ManifestDraft = {
+      name: data.name || data.repoName,
+      repoOwner: data.repoOwner,
+      repoName: data.repoName,
+    };
+    sessionStorage.setItem(manifestStateKey, state);
+    sessionStorage.setItem(manifestDraftKey, JSON.stringify(draft));
+    sessionStorage.removeItem(manifestCredentialsKey);
+
+    const origin = window.location.origin;
+    const manifest = {
+      name: `NoPager-${randomHex(4)}`,
+      url: "https://github.com/nopager/nopager",
+      description: `Self-hosted NoPager access for ${data.repoOwner}/${data.repoName}`,
+      redirect_url: `${origin}/setup`,
+      setup_url: `${origin}/setup`,
+      setup_on_update: true,
+      public: false,
+      hook_attributes: {
+        url: `${origin}/api/webhooks/github`,
+        active: publicHttpsOrigin(origin),
+      },
+      default_permissions: {
+        contents: "write",
+        pull_requests: "write",
+        actions: "read",
+      },
+      default_events: ["workflow_run"],
+    };
+
+    const form = document.createElement("form");
+    form.method = "post";
+    form.action = `https://github.com/settings/apps/new?state=${encodeURIComponent(state)}`;
+    const input = document.createElement("input");
+    input.type = "hidden";
+    input.name = "manifest";
+    input.value = JSON.stringify(manifest);
+    form.appendChild(input);
+    document.body.appendChild(form);
+    form.submit();
+  }
+
+  function useManualGitHubSetup() {
+    clearManifestSession();
+    setGitHubMode("manual");
+    setManifestStage("idle");
+    setManifestAppUrl("");
+    setData((current) => ({
+      ...current,
+      githubAppId: "",
+      githubInstallationId: "",
+      githubPrivateKey: "",
+      githubWebhookSecret: generateWebhookSecret(),
+    }));
+    setError("");
+  }
+
+  function useAutomaticGitHubSetup() {
+    clearManifestSession();
+    setGitHubMode("automatic");
+    setManifestStage("idle");
+    setManifestAppUrl("");
+    setData((current) => ({
+      ...current,
+      githubAppId: "",
+      githubInstallationId: "",
+      githubPrivateKey: "",
+      githubWebhookSecret: "",
+    }));
+    setError("");
+  }
+
   async function submit(event: FormEvent) {
     event.preventDefault();
     setBusy(true);
@@ -169,11 +385,6 @@ export default function SetupPage() {
         if (appProtected) {
           setComplete(true);
         } else {
-          setData((current) => ({
-            ...current,
-            githubWebhookSecret:
-              current.githubWebhookSecret || generateWebhookSecret(),
-          }));
           setStep(1);
         }
       } else if (step < labels.length - 1) {
@@ -215,6 +426,7 @@ export default function SetupPage() {
           });
           await expectOk(response);
         }
+        if (step === 1) clearManifestSession();
         setStep((current) => current + 1);
       } else {
         const response = await fetch("/api/nopager/setup/app", {
@@ -227,6 +439,7 @@ export default function SetupPage() {
           }),
         });
         await expectOk(response);
+        clearManifestSession();
         setComplete(true);
       }
     } catch (reason) {
@@ -272,6 +485,9 @@ export default function SetupPage() {
     );
   }
 
+  const waitingForAutomaticGitHub =
+    step === 1 && githubMode === "automatic" && manifestStage !== "installed";
+
   return (
     <SetupShell step={step}>
       <p className="eyebrow">
@@ -287,6 +503,12 @@ export default function SetupPage() {
           updateRepositoryOwner,
           updateRepositoryName,
           updateProductionUrl,
+          githubMode,
+          manifestStage,
+          manifestAppUrl,
+          startGitHubManifest,
+          useManualGitHubSetup,
+          useAutomaticGitHubSetup,
         )}
         {error && (
           <p className="form-error full" role="alert">
@@ -306,7 +528,10 @@ export default function SetupPage() {
               Back
             </button>
           )}
-          <button className="primary-button" disabled={busy}>
+          <button
+            className="primary-button"
+            disabled={busy || waitingForAutomaticGitHub}
+          >
             {busy ? "Checking…" : primaryAction(step, adminExists)}
           </button>
         </div>
@@ -378,7 +603,7 @@ function title(step: number, adminExists: boolean) {
 function description(step: number) {
   return [
     "This account exists only on your NoPager installation and controls production approvals.",
-    "Give NoPager access only to the repository it may inspect and repair. Repository ID and default branch are discovered automatically.",
+    "Give NoPager access only to the repository it may inspect and repair. The recommended path creates the least-privilege GitHub App for you.",
     "Connect the Vercel project NoPager will use for Preview verification, promotion, and rollback.",
     "Bring your own model API key. NoPager does not proxy or pay for model usage; your provider bills your account directly.",
     "NoPager needs a public HTTPS health URL that returns HTTP 200 when the app is healthy.",
@@ -467,9 +692,13 @@ function GeneratedSecret({
   const [copied, setCopied] = useState(false);
 
   async function copy() {
-    await navigator.clipboard.writeText(value);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1500);
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setCopied(false);
+    }
   }
 
   return (
@@ -498,6 +727,12 @@ function fields(
   updateRepositoryOwner: (value: string) => void,
   updateRepositoryName: (value: string) => void,
   updateProductionUrl: (value: string) => void,
+  githubMode: GitHubMode,
+  manifestStage: ManifestStage,
+  manifestAppUrl: string,
+  startGitHubManifest: () => void,
+  useManualGitHubSetup: () => void,
+  useAutomaticGitHubSetup: () => void,
 ) {
   if (step === 0) {
     return (
@@ -524,21 +759,8 @@ function fields(
   }
 
   if (step === 1) {
-    return (
+    const commonFields = (
       <>
-        <SetupNote title="One GitHub App, one repository">
-          Create a GitHub App with Contents and Pull requests read/write plus
-          Actions read-only, install it only on the repository you want NoPager
-          to protect, then paste the App values below. {" "}
-          <a
-            className="text-link"
-            href="https://github.com/nopager/nopager/blob/main/docs/GITHUB_APP_SETUP.md"
-            target="_blank"
-            rel="noreferrer"
-          >
-            Open the exact setup guide ↗
-          </a>
-        </SetupNote>
         <Input
           label="App name"
           value={data.name}
@@ -557,6 +779,82 @@ function fields(
           onChange={updateRepositoryName}
           placeholder="repository"
         />
+      </>
+    );
+
+    if (githubMode === "automatic") {
+      return (
+        <>
+          <SetupNote title="Recommended: let GitHub create the App">
+            NoPager sends GitHub a manifest containing only the required
+            Contents/Pull requests permissions, Actions read access, the setup
+            callback, and the workflow-run webhook configuration. GitHub creates
+            the App and generates the private key and webhook secret; NoPager
+            never needs a central service for this flow.
+          </SetupNote>
+          {commonFields}
+          {manifestStage === "idle" && (
+            <div className="full">
+              <button
+                type="button"
+                className="primary-button"
+                onClick={startGitHubManifest}
+              >
+                Create GitHub App automatically
+              </button>
+            </div>
+          )}
+          {manifestStage === "created" && (
+            <SetupNote title="GitHub App created">
+              The generated credentials are held only for this browser setup
+              session. {" "}
+              <a
+                className="text-link"
+                href={manifestAppUrl}
+                target="_self"
+              >
+                Open the GitHub App and install it on this repository →
+              </a>
+            </SetupNote>
+          )}
+          {manifestStage === "installed" && (
+            <SetupNote title="GitHub App installed">
+              GitHub returned installation {data.githubInstallationId}. NoPager
+              will now exchange an App JWT for a repository-scoped installation
+              token and verify that it can access exactly {data.repoOwner}/
+              {data.repoName}. The callback ID is not trusted on its own.
+            </SetupNote>
+          )}
+          <div className="full">
+            <button
+              type="button"
+              className="text-link"
+              onClick={useManualGitHubSetup}
+            >
+              Use manual GitHub App setup instead
+            </button>
+          </div>
+        </>
+      );
+    }
+
+    return (
+      <>
+        <SetupNote title="Manual GitHub App setup">
+          Use this fallback when your GitHub policy does not allow manifest
+          registration. Create a GitHub App with Contents and Pull requests
+          read/write plus Actions read-only, install it only on the repository
+          NoPager may protect, then paste the values below. {" "}
+          <a
+            className="text-link"
+            href="https://github.com/nopager/nopager/blob/main/docs/GITHUB_APP_SETUP.md"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Open the exact setup guide ↗
+          </a>
+        </SetupNote>
+        {commonFields}
         <Input
           label="GitHub App ID"
           type="number"
@@ -572,7 +870,7 @@ function fields(
           placeholder="12345678"
         />
         <GeneratedSecret
-          value={data.githubWebhookSecret}
+          value={data.githubWebhookSecret || generateWebhookSecret()}
           onRegenerate={() => update("githubWebhookSecret", generateWebhookSecret())}
         />
         <TextArea
@@ -580,6 +878,15 @@ function fields(
           value={data.githubPrivateKey}
           onChange={(v) => update("githubPrivateKey", v)}
         />
+        <div className="full">
+          <button
+            type="button"
+            className="text-link"
+            onClick={useAutomaticGitHubSetup}
+          >
+            Return to automatic GitHub setup
+          </button>
+        </div>
       </>
     );
   }
@@ -730,10 +1037,37 @@ async function expectOk(response: Response) {
   );
 }
 
-function generateWebhookSecret() {
-  const bytes = new Uint8Array(32);
+async function expectJson<T>(response: Response): Promise<T> {
+  if (!response.ok) {
+    await expectOk(response);
+    throw new Error("Request failed");
+  }
+  return (await response.json()) as T;
+}
+
+function randomHex(bytesLength: number) {
+  const bytes = new Uint8Array(bytesLength);
   window.crypto.getRandomValues(bytes);
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function generateWebhookSecret() {
+  return randomHex(32);
+}
+
+function publicHttpsOrigin(origin: string) {
+  try {
+    const url = new URL(origin);
+    const hostname = url.hostname.toLowerCase();
+    return (
+      url.protocol === "https:" &&
+      hostname !== "localhost" &&
+      hostname !== "127.0.0.1" &&
+      hostname !== "::1"
+    );
+  } catch {
+    return false;
+  }
 }
 
 function repositoryParts(value: string) {
@@ -745,6 +1079,29 @@ function repositoryParts(value: string) {
   const parts = trimmed.split("/");
   if (parts.length !== 2 || parts.some((part) => part.trim() === "")) return null;
   return { owner: parts[0], name: parts[1] };
+}
+
+function readSessionJson<T>(key: string): T | null {
+  try {
+    const value = sessionStorage.getItem(key);
+    return value ? (JSON.parse(value) as T) : null;
+  } catch {
+    return null;
+  }
+}
+
+function clearManifestSession() {
+  sessionStorage.removeItem(manifestStateKey);
+  sessionStorage.removeItem(manifestCredentialsKey);
+  sessionStorage.removeItem(manifestDraftKey);
+}
+
+function clearManifestQuery() {
+  const url = new URL(window.location.href);
+  for (const key of ["code", "state", "installation_id", "setup_action"]) {
+    url.searchParams.delete(key);
+  }
+  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
 }
 
 function message(reason: unknown) {
