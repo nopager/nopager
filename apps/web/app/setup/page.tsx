@@ -37,6 +37,11 @@ type ManifestCredentials = {
   slug: string | null;
 };
 
+type ProviderModel = {
+  id: string;
+  displayName: string;
+};
+
 type ManifestDraft = {
   name: string;
   repoOwner: string;
@@ -90,7 +95,10 @@ const setupErrors: Record<string, string> = {
   vercel_production_deployment_not_found:
     "No READY production deployment was found for this Vercel project. Deploy the app to production once, then retry.",
   provider_connection_failed:
-    "The model provider rejected this connection. Check the API key and exact model ID supported by your provider account.",
+    "The model provider rejected this connection. Check the API key and selected model, then try again.",
+  provider_api_key_required: "Enter your provider API key first.",
+  provider_models_empty:
+    "The provider connection worked but returned no usable models for this account. You can still enter a model ID manually.",
   production_health_failed:
     "The health URL did not return a successful HTTP 200 response. It must be publicly reachable from the NoPager host without browser login.",
   unsafe_health_check_url:
@@ -118,6 +126,9 @@ export default function SetupPage() {
   const [manifestAppUrl, setManifestAppUrl] = useState("");
   const [discoveringHealth, setDiscoveringHealth] = useState(false);
   const [healthDiscoveryMessage, setHealthDiscoveryMessage] = useState("");
+  const [providerModels, setProviderModels] = useState<ProviderModel[]>([]);
+  const [loadingProviderModels, setLoadingProviderModels] = useState(false);
+  const [providerModelsMessage, setProviderModelsMessage] = useState("");
 
   useEffect(() => {
     fetch("/api/nopager/setup/status", { cache: "no-store" })
@@ -291,6 +302,39 @@ export default function SetupPage() {
           ? value
           : current.healthCheckUrl,
     }));
+  }
+
+  async function loadProviderModels() {
+    if (!data.providerApiKey.trim()) {
+      setError("Enter your provider API key first.");
+      return;
+    }
+    setLoadingProviderModels(true);
+    setProviderModels([]);
+    setProviderModelsMessage("");
+    setError("");
+    try {
+      const response = await fetch("/api/nopager/setup/models", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          provider: data.provider,
+          apiKey: data.providerApiKey,
+        }),
+      });
+      const result = await expectJson<{ models: ProviderModel[] }>(response);
+      setProviderModels(result.models);
+      setProviderModelsMessage(
+        `Loaded ${result.models.length} models available to this provider account.`,
+      );
+      if (result.models.length === 1 && !data.providerModel.trim()) {
+        update("providerModel", result.models[0].id);
+      }
+    } catch (reason) {
+      setError(message(reason));
+    } finally {
+      setLoadingProviderModels(false);
+    }
   }
 
   async function discoverHealth() {
@@ -555,6 +599,10 @@ export default function SetupPage() {
           discoverHealth,
           discoveringHealth,
           healthDiscoveryMessage,
+          providerModels,
+          loadingProviderModels,
+          providerModelsMessage,
+          loadProviderModels,
         )}
         {error && (
           <p className="form-error full" role="alert">
@@ -782,6 +830,10 @@ function fields(
   discoverHealth: () => void,
   discoveringHealth: boolean,
   healthDiscoveryMessage: string,
+  providerModels: ProviderModel[],
+  loadingProviderModels: boolean,
+  providerModelsMessage: string,
+  loadProviderModels: () => void,
 ) {
   if (step === 0) {
     return (
@@ -1001,18 +1053,45 @@ function fields(
           </select>
         </label>
         <Input
-          label="Model ID"
-          value={data.providerModel}
-          onChange={(v) => update("providerModel", v)}
-          placeholder="Exact model ID from your provider"
-        />
-        <Input
           full
           label="API key"
           type="password"
           value={data.providerApiKey}
-          onChange={(v) => update("providerApiKey", v)}
+          onChange={(v) => {
+            update("providerApiKey", v);
+          }}
         />
+        <div className="full">
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={loadProviderModels}
+            disabled={loadingProviderModels || !data.providerApiKey.trim()}
+          >
+            {loadingProviderModels
+              ? "Loading models…"
+              : "Load available models"}
+          </button>
+          {providerModelsMessage && <small>{providerModelsMessage}</small>}
+        </div>
+        <label>
+          Model ID
+          <input
+            required
+            list="nopager-provider-models"
+            value={data.providerModel}
+            placeholder="Choose a discovered model or type an exact ID"
+            onChange={(event) => update("providerModel", event.target.value)}
+            autoComplete="off"
+          />
+          <datalist id="nopager-provider-models">
+            {providerModels.map((model) => (
+              <option key={model.id} value={model.id}>
+                {model.displayName}
+              </option>
+            ))}
+          </datalist>
+        </label>
       </>
     );
   }

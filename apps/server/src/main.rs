@@ -18,7 +18,9 @@ use nopager_connectors::{github::GitHubAppAuth, vercel::VercelClient};
 use nopager_crypto::SecretCipher;
 use nopager_db::{Database, ProtectedAppSetup};
 use nopager_monitor::{check_http, validate_health_url};
-use nopager_providers::{AnthropicProvider, GeminiProvider, ModelProvider, OpenAiProvider};
+use nopager_providers::{
+    AnthropicProvider, GeminiProvider, ModelProvider, OpenAiProvider, discover_available_models,
+};
 use nopager_webhooks::{verify_github, verify_vercel};
 use rand::RngCore;
 use secrecy::{ExposeSecret, SecretString};
@@ -98,6 +100,13 @@ struct ProviderConnectionRequest {
     provider: String,
     api_key: String,
     model: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderModelsRequest {
+    provider: String,
+    api_key: String,
 }
 
 #[derive(Deserialize)]
@@ -376,6 +385,33 @@ async fn test_vercel_connection(
         Err(error) => {
             tracing::warn!(%error, "Vercel connection test failed");
             api_error(StatusCode::UNPROCESSABLE_ENTITY, "vercel_connection_failed")
+        }
+    }
+}
+
+async fn discover_provider_models(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Json(request): Json<ProviderModelsRequest>,
+) -> (StatusCode, Json<Value>) {
+    if !authorized(&state, &headers).await {
+        return api_error(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    if !matches!(request.provider.as_str(), "openai" | "anthropic" | "gemini") {
+        return api_error(StatusCode::BAD_REQUEST, "unsupported_provider");
+    }
+    if request.api_key.trim().is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "provider_api_key_required");
+    }
+    match discover_available_models(&request.provider, SecretString::from(request.api_key)).await {
+        Ok(models) if !models.is_empty() => (StatusCode::OK, Json(json!({ "models": models }))),
+        Ok(_) => api_error(StatusCode::UNPROCESSABLE_ENTITY, "provider_models_empty"),
+        Err(error) => {
+            tracing::warn!(%error, "model provider discovery failed");
+            api_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "provider_connection_failed",
+            )
         }
     }
 }
@@ -1212,6 +1248,7 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/setup/test/provider",
             post(test_provider_connection),
         )
+        .route("/api/v1/setup/models", post(discover_provider_models))
         .route("/api/v1/setup/test/health", post(test_health_connection))
         .route(
             "/api/v1/setup/discover/health",

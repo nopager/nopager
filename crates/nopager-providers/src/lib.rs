@@ -6,6 +6,13 @@ use thiserror::Error;
 mod http;
 pub use http::{AnthropicProvider, GeminiProvider, OpenAiProvider};
 
+pub async fn discover_available_models(
+    provider: &str,
+    api_key: secrecy::SecretString,
+) -> Result<Vec<AvailableModel>, ProviderError> {
+    http::discover_available_models(provider, api_key).await
+}
+
 pub const VERIFIED_GITHUB_DIFF_SOURCE: &str = "verified_github_diff";
 
 const MAX_RECENT_COMMITS: usize = 8;
@@ -247,6 +254,13 @@ pub struct ControlledCommand {
     pub arguments: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AvailableModel {
+    pub id: String,
+    pub display_name: String,
+}
+
 #[async_trait]
 pub trait ModelProvider: Send + Sync {
     fn id(&self) -> &'static str;
@@ -330,6 +344,8 @@ pub enum ProviderError {
     Authentication,
     #[error("model provider request failed: {0}")]
     Request(String),
+    #[error("configured model is not available to this provider account: {0}")]
+    ModelUnavailable(String),
     #[error("verified source context is unavailable; refusing to invent a repair patch")]
     InsufficientSourceContext,
     #[error("model provider returned invalid structured output: {0}")]
