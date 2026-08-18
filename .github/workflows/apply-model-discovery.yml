@@ -55,6 +55,15 @@ jobs:
           rendered = rendered.replace('              setProviderModels([]);\n', '', 1)
           rendered = rendered.replace('            setProviderModels([]);\n', '', 1)
           page.write_text(rendered)
+
+          http = Path('crates/nopager-providers/src/http.rs')
+          rendered = http.read_text()
+          rendered = rendered.replace(
+              '        Backend::OpenAi | Backend::Anthropic => item.get("id"),\n        Backend::Gemini => item.get("name"),\n',
+              '        Backend::OpenAi | Backend::Anthropic => {\n            item.get("id")\n        }\n        Backend::Gemini => item.get("name"),\n',
+              1,
+          )
+          http.write_text(rendered)
           PY
       - name: Format and validate model discovery
         run: |
