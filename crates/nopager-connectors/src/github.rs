@@ -273,6 +273,66 @@ impl GitHubClient {
         Ok(github_headers(self.http.request(method, url)).bearer_auth(self.token.expose_secret()))
     }
 
+    async fn create_repair_commit(
+        &self,
+        repo: &str,
+        input: &PullRequestInput,
+    ) -> Result<CommitResponse, ConnectorError> {
+        let base: CommitResponse = decode(
+            self.request(
+                reqwest::Method::GET,
+                &format!("{repo}/git/commits/{}", input.base_sha),
+            )?
+            .send()
+            .await?,
+        )
+        .await?;
+        let mut entries = Vec::with_capacity(input.files.len());
+        for file in &input.files {
+            let blob: BlobResponse = decode(
+                self.request(reqwest::Method::POST, &format!("{repo}/git/blobs"))?
+                    .json(&serde_json::json!({
+                        "content": STANDARD.encode(&file.contents),
+                        "encoding": "base64"
+                    }))
+                    .send()
+                    .await?,
+            )
+            .await?;
+            entries.push(TreeEntry {
+                path: file.path.clone(),
+                mode: "100644",
+                kind: "blob",
+                sha: blob.sha,
+            });
+        }
+        let base_tree = base
+            .tree
+            .ok_or_else(|| ConnectorError::Api {
+                status: reqwest::StatusCode::BAD_GATEWAY,
+                message: "GitHub commit response omitted tree".into(),
+            })?
+            .sha;
+        let tree: TreeResponse = decode(
+            self.request(reqwest::Method::POST, &format!("{repo}/git/trees"))?
+                .json(&serde_json::json!({ "base_tree": base_tree, "tree": entries }))
+                .send()
+                .await?,
+        )
+        .await?;
+        decode(
+            self.request(reqwest::Method::POST, &format!("{repo}/git/commits"))?
+                .json(&serde_json::json!({
+                    "message": repair_commit_message(&input.title),
+                    "tree": tree.sha,
+                    "parents": [input.base_sha]
+                }))
+                .send()
+                .await?,
+        )
+        .await
+    }
+
     pub async fn open_repair_pr(
         &self,
         input: &PullRequestInput,
@@ -298,79 +358,54 @@ impl GitHubClient {
             )?
             .send()
             .await?;
-        let head_sha = if existing_ref.status().is_success() {
-            decode::<GitRefResponse>(existing_ref).await?.object.sha
-        } else if existing_ref.status() == reqwest::StatusCode::NOT_FOUND {
-            let base: CommitResponse = decode(
-                self.request(
-                    reqwest::Method::GET,
-                    &format!("{repo}/git/commits/{}", input.base_sha),
-                )?
-                .send()
-                .await?,
-            )
-            .await?;
-            let mut entries = Vec::with_capacity(input.files.len());
-            for file in &input.files {
-                let blob: BlobResponse = decode(
-                    self.request(reqwest::Method::POST, &format!("{repo}/git/blobs"))?
-                        .json(&serde_json::json!({
-                            "content": STANDARD.encode(&file.contents),
-                            "encoding": "base64"
-                        }))
-                        .send()
-                        .await?,
-                )
-                .await?;
-                entries.push(TreeEntry {
-                    path: file.path.clone(),
-                    mode: "100644",
-                    kind: "blob",
-                    sha: blob.sha,
+        let branch_exists = if existing_ref.status().is_success() {
+            let existing: GitRefResponse = decode(existing_ref).await?;
+            if existing.object.sha.trim().is_empty() {
+                return Err(ConnectorError::Api {
+                    status: reqwest::StatusCode::BAD_GATEWAY,
+                    message: "GitHub ref response omitted object SHA".into(),
                 });
             }
-            let base_tree = base
-                .tree
-                .ok_or_else(|| ConnectorError::Api {
-                    status: reqwest::StatusCode::BAD_GATEWAY,
-                    message: "GitHub commit response omitted tree".into(),
-                })?
-                .sha;
-            let tree: TreeResponse = decode(
-                self.request(reqwest::Method::POST, &format!("{repo}/git/trees"))?
-                    .json(&serde_json::json!({ "base_tree": base_tree, "tree": entries }))
-                    .send()
-                    .await?,
-            )
-            .await?;
-            let commit: CommitResponse = decode(
-                self.request(reqwest::Method::POST, &format!("{repo}/git/commits"))?
-                    .json(&serde_json::json!({
-                        "message": repair_commit_message(&input.title),
-                        "tree": tree.sha,
-                        "parents": [input.base_sha]
-                    }))
-                    .send()
-                    .await?,
-            )
-            .await?;
-            let _: serde_json::Value = decode(
-                self.request(reqwest::Method::POST, &format!("{repo}/git/refs"))?
-                    .json(&serde_json::json!({
-                        "ref": format!("refs/heads/{branch}"),
-                        "sha": commit.sha
-                    }))
-                    .send()
-                    .await?,
-            )
-            .await?;
-            commit.sha
+            true
+        } else if existing_ref.status() == reqwest::StatusCode::NOT_FOUND {
+            false
         } else {
             return Err(ConnectorError::Api {
                 status: existing_ref.status(),
                 message: existing_ref.text().await.unwrap_or_default(),
             });
         };
+
+        // Every repair attempt writes its validated file set to a fresh commit
+        // rooted at the incident base SHA. If an earlier attempt already owns
+        // the NoPager branch, replace that branch head with the new attempt so
+        // the existing draft PR/Preview cannot silently keep serving stale code.
+        let commit = self.create_repair_commit(&repo, input).await?;
+        let head_sha = commit.sha.clone();
+        if branch_exists {
+            let _: serde_json::Value = decode(
+                self.request(
+                    reqwest::Method::PATCH,
+                    &format!("{repo}/git/refs/heads/{branch}"),
+                )?
+                .json(&serde_json::json!({ "sha": head_sha, "force": true }))
+                .send()
+                .await?,
+            )
+            .await?;
+        } else {
+            let _: serde_json::Value = decode(
+                self.request(reqwest::Method::POST, &format!("{repo}/git/refs"))?
+                    .json(&serde_json::json!({
+                        "ref": format!("refs/heads/{branch}"),
+                        "sha": head_sha
+                    }))
+                    .send()
+                    .await?,
+            )
+            .await?;
+        }
+
         let body = format!(
             "## Diagnosis\n{}\n\n## Verification\n{}\n\n## Rollback\n{}\n\n## CI safety\n{}",
             input.diagnosis, input.verification, input.rollback, REPAIR_CI_NOTICE
