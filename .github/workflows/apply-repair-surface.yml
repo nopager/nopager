@@ -149,19 +149,16 @@ jobs:
               'trusted provenance preservation',
           )
           text = http.read_text()
-          marker = '            relevant_files: Vec::new(),\n'
-          occurrences = text.count(marker)
-          if occurrences != 2:
-              raise SystemExit(f'http DiagnosisInput fixtures: expected 2, found {occurrences}')
-          text = text.replace(
-              marker,
-              '            relevant_files: Vec::new(),\n            verified_repair_files: vec!["src/login.ts".into()],\n',
-              1,
-          )
-          text = text.replace(
-              marker,
-              '            relevant_files: Vec::new(),\n            verified_repair_files: vec!["src/config.ts".into()],\n',
-              1,
+          marker = '            health_failure: Value::Null,\n            relevant_files: Vec::new(),\n        };'
+          parts = text.split(marker)
+          if len(parts) != 3:
+              raise SystemExit(f'http DiagnosisInput fixtures: expected 2, found {len(parts) - 1}')
+          text = (
+              parts[0]
+              + '            health_failure: Value::Null,\n            relevant_files: Vec::new(),\n            verified_repair_files: vec!["src/login.ts".into()],\n        };'
+              + parts[1]
+              + '            health_failure: Value::Null,\n            relevant_files: Vec::new(),\n            verified_repair_files: vec!["src/config.ts".into()],\n        };'
+              + parts[2]
           )
           http.write_text(text)
           replace_once(
