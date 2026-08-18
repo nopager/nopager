@@ -101,7 +101,8 @@ const setupErrors: Record<string, string> = {
     "One or more required setup values are missing or invalid. Return to the earlier step and verify each connection.",
   app_already_protected:
     "This NoPager Alpha installation already protects an app. The current open-source Alpha supports one protected app per installation.",
-  unauthorized: "Your local admin session expired. Sign in again and continue setup.",
+  unauthorized:
+    "Your local admin session expired. Sign in again and continue setup.",
 };
 
 export default function SetupPage() {
@@ -149,7 +150,11 @@ export default function SetupPage() {
 
       if (code) {
         const expectedState = sessionStorage.getItem(manifestStateKey);
-        if (!expectedState || !returnedState || expectedState !== returnedState) {
+        if (
+          !expectedState ||
+          !returnedState ||
+          expectedState !== returnedState
+        ) {
           if (!cancelled) {
             setError(
               "GitHub App registration state did not match this setup session. Start automatic GitHub setup again.",
@@ -194,7 +199,8 @@ export default function SetupPage() {
 
       if (installationId && storedCredentials) {
         if (!/^\d+$/.test(installationId)) {
-          if (!cancelled) setError("GitHub returned an invalid installation ID.");
+          if (!cancelled)
+            setError("GitHub returned an invalid installation ID.");
           clearManifestQuery();
           return;
         }
@@ -707,11 +713,11 @@ function GeneratedSecret({
       <input readOnly value={value} autoComplete="off" spellCheck={false} />
       <small>
         Generated locally in your browser. Copy this exact value into the GitHub
-        App webhook secret field. {" "}
+        App webhook secret field.{" "}
         <button type="button" className="text-link" onClick={copy}>
           {copied ? "Copied" : "Copy secret"}
         </button>{" "}
-        · {" "}
+        ·{" "}
         <button type="button" className="text-link" onClick={onRegenerate}>
           Regenerate
         </button>
@@ -807,12 +813,8 @@ function fields(
           {manifestStage === "created" && (
             <SetupNote title="GitHub App created">
               The generated credentials are held only for this browser setup
-              session. {" "}
-              <a
-                className="text-link"
-                href={manifestAppUrl}
-                target="_self"
-              >
+              session.{" "}
+              <a className="text-link" href={manifestAppUrl} target="_self">
                 Open the GitHub App and install it on this repository →
               </a>
             </SetupNote>
@@ -844,7 +846,7 @@ function fields(
           Use this fallback when your GitHub policy does not allow manifest
           registration. Create a GitHub App with Contents and Pull requests
           read/write plus Actions read-only, install it only on the repository
-          NoPager may protect, then paste the values below. {" "}
+          NoPager may protect, then paste the values below.{" "}
           <a
             className="text-link"
             href="https://github.com/nopager/nopager/blob/main/docs/GITHUB_APP_SETUP.md"
@@ -870,8 +872,10 @@ function fields(
           placeholder="12345678"
         />
         <GeneratedSecret
-          value={data.githubWebhookSecret || generateWebhookSecret()}
-          onRegenerate={() => update("githubWebhookSecret", generateWebhookSecret())}
+          value={data.githubWebhookSecret}
+          onRegenerate={() =>
+            update("githubWebhookSecret", generateWebhookSecret())
+          }
         />
         <TextArea
           label="GitHub App private key (PEM)"
@@ -1048,7 +1052,9 @@ async function expectJson<T>(response: Response): Promise<T> {
 function randomHex(bytesLength: number) {
   const bytes = new Uint8Array(bytesLength);
   window.crypto.getRandomValues(bytes);
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
+    "",
+  );
 }
 
 function generateWebhookSecret() {
@@ -1077,7 +1083,8 @@ function repositoryParts(value: string) {
     .replace(/\.git$/, "")
     .replace(/^\/+|\/+$/g, "");
   const parts = trimmed.split("/");
-  if (parts.length !== 2 || parts.some((part) => part.trim() === "")) return null;
+  if (parts.length !== 2 || parts.some((part) => part.trim() === ""))
+    return null;
   return { owner: parts[0], name: parts[1] };
 }
 
@@ -1101,7 +1108,11 @@ function clearManifestQuery() {
   for (const key of ["code", "state", "installation_id", "setup_action"]) {
     url.searchParams.delete(key);
   }
-  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+  window.history.replaceState(
+    {},
+    "",
+    `${url.pathname}${url.search}${url.hash}`,
+  );
 }
 
 function message(reason: unknown) {

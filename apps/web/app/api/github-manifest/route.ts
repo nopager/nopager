@@ -65,7 +65,9 @@ export async function POST(request: NextRequest) {
 
   let code: string;
   try {
-    const value = JSON.parse(new TextDecoder().decode(body)) as { code?: unknown };
+    const value = JSON.parse(new TextDecoder().decode(body)) as {
+      code?: unknown;
+    };
     if (typeof value.code !== "string") {
       return jsonError("invalid_github_manifest_code", 400);
     }
