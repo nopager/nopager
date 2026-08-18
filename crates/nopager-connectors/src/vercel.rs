@@ -331,7 +331,12 @@ fn preview_variable_is_sensitive(variable: &ProjectEnvironmentVariable) -> bool 
 fn preview_secrets_explicitly_allowed() -> bool {
     std::env::var(PREVIEW_SECRETS_OVERRIDE)
         .ok()
-        .is_some_and(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
 }
 
 fn normalize_current_target(mut deployment: Deployment) -> Deployment {
