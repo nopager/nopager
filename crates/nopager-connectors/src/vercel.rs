@@ -458,7 +458,10 @@ mod tests {
     #[test]
     fn repeated_environment_variable_cursor_fails_closed() {
         assert!(next_page_cursor(Some(123), Some(123)).is_err());
-        assert_eq!(next_page_cursor(Some(123), None).expect("complete page"), None);
+        assert_eq!(
+            next_page_cursor(Some(123), None).expect("complete page"),
+            None
+        );
         assert_eq!(
             next_page_cursor(Some(123), Some(122)).expect("advanced cursor"),
             Some(122)
