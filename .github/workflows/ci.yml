@@ -153,3 +153,58 @@ jobs:
       - name: Tear down smoke stack
         if: always()
         run: docker compose down -v --remove-orphans
+
+  publish-images:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [validate, self-host-smoke]
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Log in to GitHub Container Registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Build and push architecture images
+        env:
+          IMAGE_TAG: sha-${{ github.sha }}-${{ matrix.arch }}
+        run: |
+          for service in server worker web; do
+            image="ghcr.io/${{ github.repository_owner }}/nopager-${service}"
+            docker build \
+              --file "docker/${service}.Dockerfile" \
+              --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+              --label "org.opencontainers.image.revision=${{ github.sha }}" \
+              --tag "${image}:${IMAGE_TAG}" \
+              .
+            docker push "${image}:${IMAGE_TAG}"
+          done
+
+  publish-image-manifests:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [publish-images]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Log in to GitHub Container Registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Publish exact-revision multi-arch manifests
+        run: |
+          for service in server worker web; do
+            image="ghcr.io/${{ github.repository_owner }}/nopager-${service}"
+            docker buildx imagetools create \
+              --tag "${image}:sha-${GITHUB_SHA}" \
+              "${image}:sha-${GITHUB_SHA}-amd64" \
+              "${image}:sha-${GITHUB_SHA}-arm64"
+          done
