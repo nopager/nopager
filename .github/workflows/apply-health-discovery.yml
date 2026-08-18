@@ -1,0 +1,118 @@
+name: Apply safe health discovery
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event.pull_request.head.ref == 'agent/health-check-discovery' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Enable pinned pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.32.1 --activate
+      - run: pnpm install --frozen-lockfile
+      - name: Apply bounded health discovery
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new, label):
+              text = path.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected once, found {count}')
+              path.write_text(text.replace(old, new, 1))
+
+          server = Path('apps/server/src/main.rs')
+          replace_once(
+              server,
+              '''#[derive(Deserialize)]\nstruct HealthConnectionRequest {\n    url: String,\n}\n''',
+              '''#[derive(Deserialize)]\nstruct HealthConnectionRequest {\n    url: String,\n}\n\n#[derive(Deserialize)]\n#[serde(rename_all = "camelCase")]\nstruct HealthDiscoveryRequest {\n    production_url: String,\n}\n''',
+              'health discovery request',
+          )
+          replace_once(
+              server,
+              '''async fn test_health_connection(\n    State(state): State<ServerState>,\n    headers: HeaderMap,\n    Json(request): Json<HealthConnectionRequest>,\n) -> (StatusCode, Json<Value>) {\n''',
+              '''async fn discover_health_connection(\n    State(state): State<ServerState>,\n    headers: HeaderMap,\n    Json(request): Json<HealthDiscoveryRequest>,\n) -> (StatusCode, Json<Value>) {\n    if !authorized(&state, &headers).await {\n        return api_error(StatusCode::UNAUTHORIZED, "unauthorized");\n    }\n    let production_url = match Url::parse(&request.production_url) {\n        Ok(url) if validate_health_url(&url).is_ok() => url,\n        _ => return api_error(StatusCode::BAD_REQUEST, "unsafe_production_url"),\n    };\n    let candidates = health_discovery_candidates(&production_url);\n    for candidate in &candidates {\n        if validate_health_url(candidate).is_err() {\n            continue;\n        }\n        if let Ok(observation) =\n            check_http(candidate, 200, std::time::Duration::from_secs(5)).await\n            && observation.success\n        {\n            return (\n                StatusCode::OK,\n                Json(json!({\n                    "found": true,\n                    "url": candidate.as_str(),\n                    "attempted": candidates.len()\n                })),\n            );\n        }\n    }\n    (\n        StatusCode::OK,\n        Json(json!({ "found": false, "attempted": candidates.len() })),\n    )\n}\n\nfn health_discovery_candidates(production_url: &Url) -> Vec<Url> {\n    let mut candidates = Vec::new();\n    let mut exact = production_url.clone();\n    exact.set_fragment(None);\n    candidates.push(exact);\n\n    for path in ["/health", "/healthz", "/api/health", "/api/healthz"] {\n        let mut candidate = production_url.clone();\n        candidate.set_path(path);\n        candidate.set_query(None);\n        candidate.set_fragment(None);\n        if !candidates.iter().any(|existing| existing == &candidate) {\n            candidates.push(candidate);\n        }\n    }\n    candidates\n}\n\nasync fn test_health_connection(\n    State(state): State<ServerState>,\n    headers: HeaderMap,\n    Json(request): Json<HealthConnectionRequest>,\n) -> (StatusCode, Json<Value>) {\n''',
+              'health discovery handler',
+          )
+          replace_once(
+              server,
+              '''        .route("/api/v1/setup/test/health", post(test_health_connection))\n        .route("/api/v1/setup/app", post(protect_app))\n''',
+              '''        .route("/api/v1/setup/test/health", post(test_health_connection))\n        .route(\n            "/api/v1/setup/discover/health",\n            post(discover_health_connection),\n        )\n        .route("/api/v1/setup/app", post(protect_app))\n''',
+              'health discovery route',
+          )
+          replace_once(
+              server,
+              '''    #[tokio::test]\n    async fn mutation_auth_requires_exact_bearer_token() {\n''',
+              '''    #[test]\n    fn health_discovery_is_small_deterministic_and_same_origin() {\n        let production = Url::parse("https://example.com/app?tenant=alpha#section").unwrap();\n        let candidates = health_discovery_candidates(&production);\n        assert_eq!(\n            candidates.iter().map(Url::as_str).collect::<Vec<_>>(),\n            vec![\n                "https://example.com/app?tenant=alpha",\n                "https://example.com/health",\n                "https://example.com/healthz",\n                "https://example.com/api/health",\n                "https://example.com/api/healthz",\n            ]\n        );\n        assert!(candidates.iter().all(|candidate| {\n            candidate.scheme() == "https" && candidate.host_str() == Some("example.com")\n        }));\n    }\n\n    #[test]\n    fn health_discovery_deduplicates_exact_health_path() {\n        let production = Url::parse("https://example.com/health").unwrap();\n        let candidates = health_discovery_candidates(&production);\n        assert_eq!(candidates.len(), 4);\n        assert_eq!(candidates[0].as_str(), "https://example.com/health");\n    }\n\n    #[tokio::test]\n    async fn mutation_auth_requires_exact_bearer_token() {\n''',
+              'health discovery tests',
+          )
+
+          page = Path('apps/web/app/setup/page.tsx')
+          replace_once(
+              page,
+              '''  const [manifestStage, setManifestStage] = useState<ManifestStage>("idle");\n  const [manifestAppUrl, setManifestAppUrl] = useState("");\n''',
+              '''  const [manifestStage, setManifestStage] = useState<ManifestStage>("idle");\n  const [manifestAppUrl, setManifestAppUrl] = useState("");\n  const [discoveringHealth, setDiscoveringHealth] = useState(false);\n  const [healthDiscoveryMessage, setHealthDiscoveryMessage] = useState("");\n''',
+              'health discovery state',
+          )
+          replace_once(
+              page,
+              '''  function updateProductionUrl(value: string) {\n    setData((current) => ({\n''',
+              '''  function updateProductionUrl(value: string) {\n    setHealthDiscoveryMessage("");\n    setData((current) => ({\n''',
+              'clear health discovery state',
+          )
+          replace_once(
+              page,
+              '''  function startGitHubManifest() {\n''',
+              '''  async function discoverHealth() {\n    if (!data.productionUrl.trim()) {\n      setError("Enter the production URL first.");\n      return;\n    }\n    setDiscoveringHealth(true);\n    setHealthDiscoveryMessage("");\n    setError("");\n    try {\n      const response = await fetch("/api/nopager/setup/discover/health", {\n        method: "POST",\n        headers: { "content-type": "application/json" },\n        body: JSON.stringify({ productionUrl: data.productionUrl }),\n      });\n      const result = await expectJson<{\n        found: boolean;\n        url?: string;\n        attempted: number;\n      }>(response);\n      if (result.found && result.url) {\n        update("healthCheckUrl", result.url);\n        setHealthDiscoveryMessage(`Detected ${result.url}`);\n      } else {\n        setHealthDiscoveryMessage(\n          `No standard health endpoint returned HTTP 200 (${result.attempted} safe paths checked). Enter your app's health URL manually.`,\n        );\n      }\n    } catch (reason) {\n      setError(message(reason));\n    } finally {\n      setDiscoveringHealth(false);\n    }\n  }\n\n  function startGitHubManifest() {\n''',
+              'health discovery client action',
+          )
+          replace_once(
+              page,
+              '''          useManualGitHubSetup,\n          useAutomaticGitHubSetup,\n        )}\n''',
+              '''          useManualGitHubSetup,\n          useAutomaticGitHubSetup,\n          discoverHealth,\n          discoveringHealth,\n          healthDiscoveryMessage,\n        )}\n''',
+              'health discovery field arguments',
+          )
+          replace_once(
+              page,
+              '''  useManualGitHubSetup: () => void,\n  useAutomaticGitHubSetup: () => void,\n) {\n''',
+              '''  useManualGitHubSetup: () => void,\n  useAutomaticGitHubSetup: () => void,\n  discoverHealth: () => void,\n  discoveringHealth: boolean,\n  healthDiscoveryMessage: string,\n) {\n''',
+              'health discovery field signature',
+          )
+          replace_once(
+              page,
+              '''        <Input\n          full\n          label="Health check URL"\n          type="url"\n          value={data.healthCheckUrl}\n          onChange={(v) => update("healthCheckUrl", v)}\n          placeholder="https://example.com/health"\n        />\n''',
+              '''        <div className="full">\n          <button\n            type="button"\n            className="secondary-button"\n            onClick={discoverHealth}\n            disabled={discoveringHealth || !data.productionUrl.trim()}\n          >\n            {discoveringHealth ? "Checking safe paths…" : "Find health endpoint"}\n          </button>\n          {healthDiscoveryMessage && <small>{healthDiscoveryMessage}</small>}\n        </div>\n        <Input\n          full\n          label="Health check URL"\n          type="url"\n          value={data.healthCheckUrl}\n          onChange={(v) => update("healthCheckUrl", v)}\n          placeholder="https://example.com/health"\n        />\n''',
+              'health discovery UI',
+          )
+      - name: Format and validate health discovery
+        run: |
+          rustup toolchain install 1.92.0 --profile minimal --component clippy --component rustfmt
+          rustup override set 1.92.0
+          pnpm exec prettier --write apps/web/app/setup/page.tsx
+          cargo fmt --all
+          pnpm format:check
+          pnpm lint
+          pnpm typecheck
+          cargo test -p nopager-server
+          cargo clippy --workspace --all-targets -- -D warnings
+      - name: Commit health discovery
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/server/src/main.rs apps/web/app/setup/page.tsx
+          git diff --cached --quiet && { echo "No health-discovery changes produced"; exit 1; }
+          git commit -m "Discover safe production health endpoint"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
