@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 
 type SetupData = {
@@ -24,6 +24,15 @@ type SetupData = {
   productionUrl: string;
   healthCheckUrl: string;
   safetyMode: "safe" | "autopilot";
+};
+
+type GitHubAppOwner = "personal" | "organization";
+
+type GitHubManifestExchange = {
+  appId: number;
+  slug: string;
+  privateKey: string;
+  webhookSecret: string;
 };
 
 const initial: SetupData = {
@@ -58,6 +67,13 @@ export default function SetupPage() {
   const [complete, setComplete] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [githubAppOwner, setGithubAppOwner] =
+    useState<GitHubAppOwner>("personal");
+  const [githubManifestState, setGithubManifestState] = useState("");
+  const [githubAppSlug, setGithubAppSlug] = useState("");
+  const [githubAutoBusy, setGithubAutoBusy] = useState(false);
+  const manifestPopup = useRef<Window | null>(null);
+  const installPopup = useRef<Window | null>(null);
 
   useEffect(() => {
     fetch("/api/nopager/setup/status", { cache: "no-store" })
@@ -77,8 +93,167 @@ export default function SetupPage() {
       .catch((reason: unknown) => setError(message(reason)));
   }, []);
 
+  useEffect(() => {
+    function receiveGitHubSetup(event: MessageEvent) {
+      if (event.origin !== window.location.origin || !event.data) return;
+      const payload = event.data as {
+        type?: unknown;
+        code?: unknown;
+        state?: unknown;
+        installationId?: unknown;
+      };
+
+      if (payload.type === "nopager-github-manifest") {
+        if (manifestPopup.current && event.source !== manifestPopup.current) return;
+        if (
+          typeof payload.code !== "string" ||
+          typeof payload.state !== "string" ||
+          payload.state !== githubManifestState
+        ) {
+          setError("GitHub App registration state did not match. Try again.");
+          return;
+        }
+        setGithubAutoBusy(true);
+        setError("");
+        void fetch("/api/github-manifest/convert", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ code: payload.code }),
+        })
+          .then(async (response) => {
+            await expectOk(response);
+            return response.json() as Promise<GitHubManifestExchange>;
+          })
+          .then((app) => {
+            setData((current) => ({
+              ...current,
+              githubAppId: String(app.appId),
+              githubPrivateKey: app.privateKey,
+              githubWebhookSecret: app.webhookSecret,
+              githubInstallationId: "",
+            }));
+            setGithubAppSlug(app.slug);
+          })
+          .catch((reason: unknown) => setError(message(reason)))
+          .finally(() => setGithubAutoBusy(false));
+        return;
+      }
+
+      if (payload.type === "nopager-github-install") {
+        if (installPopup.current && event.source !== installPopup.current) return;
+        if (
+          typeof payload.installationId !== "string" ||
+          !/^\d+$/.test(payload.installationId)
+        ) {
+          setError("GitHub returned an invalid installation ID. Try the install step again.");
+          return;
+        }
+        setData((current) => ({
+          ...current,
+          githubInstallationId: payload.installationId as string,
+        }));
+        setError("");
+      }
+    }
+
+    window.addEventListener("message", receiveGitHubSetup);
+    return () => window.removeEventListener("message", receiveGitHubSetup);
+  }, [githubManifestState]);
+
   function update<K extends keyof SetupData>(key: K, value: SetupData[K]) {
     setData((current) => ({ ...current, [key]: value }));
+  }
+
+  function startGithubManifest() {
+    if (!data.name.trim() || !data.repoOwner.trim() || !data.repoName.trim()) {
+      setError("Enter the app name and GitHub repository first.");
+      return;
+    }
+    if (
+      window.location.protocol !== "https:" &&
+      !["localhost", "127.0.0.1", "::1"].includes(window.location.hostname)
+    ) {
+      setError("Use HTTPS for remote NoPager setup before creating the GitHub App.");
+      return;
+    }
+
+    const popup = window.open(
+      "",
+      "nopager-github-manifest",
+      "popup,width=760,height=760",
+    );
+    if (!popup) {
+      setError("Allow popups for this NoPager console and try again.");
+      return;
+    }
+    manifestPopup.current = popup;
+
+    const state = crypto.randomUUID();
+    setGithubManifestState(state);
+    setGithubAppSlug("");
+    setData((current) => ({
+      ...current,
+      githubAppId: "",
+      githubInstallationId: "",
+      githubPrivateKey: "",
+      githubWebhookSecret: "",
+    }));
+    setError("");
+
+    const origin = window.location.origin;
+    const manifest = {
+      name: `NoPager ${data.repoName} ${state.slice(0, 8)}`,
+      url: origin,
+      description: "Self-hosted NoPager AI on-call integration",
+      hook_attributes: {
+        url: `${origin}/api/webhooks/github`,
+        active: true,
+      },
+      redirect_url: `${origin}/setup/github-manifest`,
+      setup_url: `${origin}/setup/github-install`,
+      setup_on_update: true,
+      public: false,
+      default_permissions: {
+        actions: "read",
+        contents: "write",
+        pull_requests: "write",
+      },
+      default_events: ["workflow_run"],
+    };
+
+    const form = document.createElement("form");
+    form.method = "POST";
+    form.target = "nopager-github-manifest";
+    form.action =
+      githubAppOwner === "organization"
+        ? `https://github.com/organizations/${encodeURIComponent(data.repoOwner.trim())}/settings/apps/new?state=${encodeURIComponent(state)}`
+        : `https://github.com/settings/apps/new?state=${encodeURIComponent(state)}`;
+    const input = document.createElement("input");
+    input.type = "hidden";
+    input.name = "manifest";
+    input.value = JSON.stringify(manifest);
+    form.appendChild(input);
+    document.body.appendChild(form);
+    form.submit();
+    form.remove();
+  }
+
+  function startGithubInstall() {
+    if (!githubAppSlug) {
+      setError("Create the GitHub App first.");
+      return;
+    }
+    const popup = window.open(
+      `https://github.com/apps/${encodeURIComponent(githubAppSlug)}/installations/new`,
+      "nopager-github-install",
+      "popup,width=760,height=760",
+    );
+    if (!popup) {
+      setError("Allow popups for this NoPager console and try again.");
+      return;
+    }
+    installPopup.current = popup;
+    setError("");
   }
 
   async function submit(event: FormEvent) {
@@ -198,6 +373,12 @@ export default function SetupPage() {
     );
   }
 
+  const githubReady =
+    data.githubAppId.length > 0 &&
+    data.githubInstallationId.length > 0 &&
+    data.githubPrivateKey.length > 0 &&
+    data.githubWebhookSecret.length >= 16;
+
   return (
     <SetupShell step={step}>
       <p className="eyebrow">
@@ -206,7 +387,20 @@ export default function SetupPage() {
       <h1>{title(step, adminExists)}</h1>
       <p>{description(step)}</p>
       <form className="form-grid setup-form" onSubmit={submit}>
-        {fields(step, data, update)}
+        {step === 1 ? (
+          <GitHubSetupFields
+            data={data}
+            update={update}
+            owner={githubAppOwner}
+            setOwner={setGithubAppOwner}
+            appSlug={githubAppSlug}
+            autoBusy={githubAutoBusy}
+            onCreate={startGithubManifest}
+            onInstall={startGithubInstall}
+          />
+        ) : (
+          fields(step, data, update)
+        )}
         {error && (
           <p className="form-error full" role="alert">
             {error}
@@ -222,18 +416,148 @@ export default function SetupPage() {
               Back
             </button>
           )}
-          <button className="primary-button" disabled={busy}>
+          <button
+            className="primary-button"
+            disabled={busy || githubAutoBusy || (step === 1 && !githubReady)}
+          >
             {busy
               ? "Checking…"
               : step === labels.length - 1
                 ? "Protect App"
                 : step === 0
                   ? "Save & continue"
-                  : "Test & continue"}
+                  : step === 1 && !githubReady
+                    ? "Complete GitHub setup above"
+                    : "Test & continue"}
           </button>
         </div>
       </form>
     </SetupShell>
+  );
+}
+
+function GitHubSetupFields({
+  data,
+  update,
+  owner,
+  setOwner,
+  appSlug,
+  autoBusy,
+  onCreate,
+  onInstall,
+}: {
+  data: SetupData;
+  update: <K extends keyof SetupData>(key: K, value: SetupData[K]) => void;
+  owner: GitHubAppOwner;
+  setOwner: (value: GitHubAppOwner) => void;
+  appSlug: string;
+  autoBusy: boolean;
+  onCreate: () => void;
+  onInstall: () => void;
+}) {
+  const created =
+    data.githubAppId.length > 0 &&
+    data.githubPrivateKey.length > 0 &&
+    data.githubWebhookSecret.length >= 16;
+  const installed = created && data.githubInstallationId.length > 0;
+
+  return (
+    <>
+      <Input
+        label="App name"
+        value={data.name}
+        onChange={(value) => update("name", value)}
+      />
+      <Input
+        label="Repository owner"
+        value={data.repoOwner}
+        onChange={(value) => update("repoOwner", value)}
+      />
+      <Input
+        full
+        label="Repository name"
+        value={data.repoName}
+        onChange={(value) => update("repoName", value)}
+      />
+      <label className="full">
+        Where should GitHub own this App?
+        <select
+          value={owner}
+          onChange={(event) => setOwner(event.target.value as GitHubAppOwner)}
+        >
+          <option value="personal">My personal GitHub account</option>
+          <option value="organization">Repository owner organization</option>
+        </select>
+        <small>
+          For organization repositories, choose the organization option and make
+          sure you can create GitHub Apps there.
+        </small>
+      </label>
+      <div className="full form-actions">
+        <button
+          type="button"
+          className="secondary-button"
+          disabled={autoBusy}
+          onClick={onCreate}
+        >
+          {autoBusy
+            ? "Finishing GitHub registration…"
+            : created
+              ? "Re-create GitHub App"
+              : "Create GitHub App automatically"}
+        </button>
+        {created && !installed && appSlug && (
+          <button type="button" className="primary-button" onClick={onInstall}>
+            Install on repository
+          </button>
+        )}
+      </div>
+      {created && !installed && (
+        <p className="full">
+          GitHub App created. Install it and select only the repository NoPager
+          should protect.
+        </p>
+      )}
+      {installed && (
+        <p className="full">
+          ✓ GitHub App registered and installed. NoPager will verify access when
+          you continue.
+        </p>
+      )}
+      <details className="full">
+        <summary>Advanced: use an existing GitHub App</summary>
+        <div className="form-grid">
+          <Input
+            label="GitHub App ID"
+            type="number"
+            required={false}
+            value={data.githubAppId}
+            onChange={(value) => update("githubAppId", value)}
+          />
+          <Input
+            label="Installation ID"
+            type="number"
+            required={false}
+            value={data.githubInstallationId}
+            onChange={(value) => update("githubInstallationId", value)}
+          />
+          <Input
+            full
+            label="Webhook secret"
+            type="password"
+            required={false}
+            value={data.githubWebhookSecret}
+            onChange={(value) => update("githubWebhookSecret", value)}
+          />
+          <TextArea
+            label="GitHub App private key (PEM)"
+            required={false}
+            value={data.githubPrivateKey}
+            onChange={(value) => update("githubPrivateKey", value)}
+          />
+        </div>
+      </details>
+    </>
   );
 }
 
@@ -278,7 +602,7 @@ function title(step: number, adminExists: boolean) {
 function description(step: number) {
   return [
     "Your local account controls production approvals.",
-    "Add the GitHub App and repository NoPager may repair. Repository ID and default branch are discovered automatically.",
+    "Choose the repository, then let NoPager create a least-privilege GitHub App with the required permissions. Existing GitHub Apps remain supported under Advanced.",
     "Select the Vercel project used for previews and production. Team ID and webhook secret are optional; polling remains active without a Vercel webhook.",
     "Your API key is encrypted locally and never shown again. The full repository stays in the self-hosted worker; NoPager sends only bounded incident evidence to your BYOK model provider after local secret redaction. Relevant code diffs may still leave this host. Enter the exact model ID supported by your provider.",
     "NoPager will require a passing public HTTPS health check.",
@@ -322,16 +646,18 @@ function TextArea({
   label,
   value,
   onChange,
+  required = true,
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
+  required?: boolean;
 }) {
   return (
     <label className="full">
       {label}
       <textarea
-        required
+        required={required}
         rows={9}
         value={value}
         onChange={(event) => onChange(event.target.value)}
@@ -354,58 +680,14 @@ function fields(
         <Input
           label="Username"
           value={data.username}
-          onChange={(v) => update("username", v)}
+          onChange={(value) => update("username", value)}
         />
         <Input
           label="Password (12+ characters)"
           type="password"
           minLength={12}
           value={data.password}
-          onChange={(v) => update("password", v)}
-        />
-      </>
-    );
-  if (step === 1)
-    return (
-      <>
-        <Input
-          label="App name"
-          value={data.name}
-          onChange={(v) => update("name", v)}
-        />
-        <Input
-          label="Repository owner"
-          value={data.repoOwner}
-          onChange={(v) => update("repoOwner", v)}
-        />
-        <Input
-          label="Repository name"
-          value={data.repoName}
-          onChange={(v) => update("repoName", v)}
-        />
-        <Input
-          label="GitHub App ID"
-          type="number"
-          value={data.githubAppId}
-          onChange={(v) => update("githubAppId", v)}
-        />
-        <Input
-          label="Installation ID"
-          type="number"
-          value={data.githubInstallationId}
-          onChange={(v) => update("githubInstallationId", v)}
-        />
-        <Input
-          label="Webhook secret"
-          type="password"
-          minLength={16}
-          value={data.githubWebhookSecret}
-          onChange={(v) => update("githubWebhookSecret", v)}
-        />
-        <TextArea
-          label="GitHub App private key (PEM)"
-          value={data.githubPrivateKey}
-          onChange={(v) => update("githubPrivateKey", v)}
+          onChange={(value) => update("password", value)}
         />
       </>
     );
@@ -415,25 +697,25 @@ function fields(
         <Input
           label="Team ID (optional for personal account)"
           value={data.vercelTeamId}
-          onChange={(v) => update("vercelTeamId", v)}
+          onChange={(value) => update("vercelTeamId", value)}
           required={false}
         />
         <Input
           label="Project ID or project name"
           value={data.vercelProjectId}
-          onChange={(v) => update("vercelProjectId", v)}
+          onChange={(value) => update("vercelProjectId", value)}
         />
         <Input
           label="Access token"
           type="password"
           value={data.vercelToken}
-          onChange={(v) => update("vercelToken", v)}
+          onChange={(value) => update("vercelToken", value)}
         />
         <Input
           label="Webhook secret (optional)"
           type="password"
           value={data.vercelWebhookSecret}
-          onChange={(v) => update("vercelWebhookSecret", v)}
+          onChange={(value) => update("vercelWebhookSecret", value)}
           required={false}
         />
       </>
@@ -458,14 +740,14 @@ function fields(
         <Input
           label="Model ID"
           value={data.providerModel}
-          onChange={(v) => update("providerModel", v)}
+          onChange={(value) => update("providerModel", value)}
         />
         <Input
           full
           label="API key"
           type="password"
           value={data.providerApiKey}
-          onChange={(v) => update("providerApiKey", v)}
+          onChange={(value) => update("providerApiKey", value)}
         />
       </>
     );
@@ -477,14 +759,14 @@ function fields(
           label="Production URL"
           type="url"
           value={data.productionUrl}
-          onChange={(v) => update("productionUrl", v)}
+          onChange={(value) => update("productionUrl", value)}
         />
         <Input
           full
           label="Health check URL"
           type="url"
           value={data.healthCheckUrl}
-          onChange={(v) => update("healthCheckUrl", v)}
+          onChange={(value) => update("healthCheckUrl", value)}
         />
       </>
     );
