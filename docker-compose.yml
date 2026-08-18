@@ -30,6 +30,7 @@ services:
 
   server:
     <<: *read-only-app
+    image: ghcr.io/nopager/nopager-server:${NOPAGER_IMAGE_TAG:-local}
     build:
       context: .
       dockerfile: docker/server.Dockerfile
@@ -70,6 +71,7 @@ services:
 
   worker:
     <<: *read-only-app
+    image: ghcr.io/nopager/nopager-worker:${NOPAGER_IMAGE_TAG:-local}
     build:
       context: .
       dockerfile: docker/worker.Dockerfile
@@ -119,6 +121,7 @@ services:
 
   web:
     <<: *read-only-app
+    image: ghcr.io/nopager/nopager-web:${NOPAGER_IMAGE_TAG:-local}
     build:
       context: .
       dockerfile: docker/web.Dockerfile
