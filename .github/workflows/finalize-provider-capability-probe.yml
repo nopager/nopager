@@ -1,0 +1,86 @@
+name: Finalize provider capability probe
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: github.event.pull_request.head.ref == 'agent/provider-capability-probe' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Enable pinned pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.32.1 --activate
+      - run: pnpm install --frozen-lockfile
+      - name: Apply existing transform and correct Gemini request assertion
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import textwrap
+
+          workflow = Path('.github/workflows/apply-provider-capability-probe.yml').read_text()
+          start_marker = "          python - <<'PY'\n"
+          end_marker = "\n          PY\n"
+          start = workflow.index(start_marker) + len(start_marker)
+          end = workflow.index(end_marker, start)
+          script = textwrap.dedent(workflow[start:end])
+          exec(compile(script, 'provider-capability-transform', 'exec'), {'__name__': '__main__'})
+
+          http = Path('crates/nopager-providers/src/http.rs')
+          rendered = http.read_text()
+          start = rendered.index('    fn capability_probe_uses_the_runtime_structured_output_path_with_a_small_budget()')
+          end = rendered.index('    #[test]\n    fn capability_probe_schema_requires_only_the_boolean_result()', start)
+          test = rendered[start:end]
+          old = '''            assert_eq!(body["model"], "test-model");\n            match backend {\n                Backend::OpenAi => {\n                    assert_eq!(body["max_output_tokens"], CAPABILITY_PROBE_MAX_OUTPUT_TOKENS);\n'''
+          new = '''            match backend {\n                Backend::OpenAi => {\n                    assert_eq!(body["model"], "test-model");\n                    assert_eq!(body["max_output_tokens"], CAPABILITY_PROBE_MAX_OUTPUT_TOKENS);\n'''
+          if test.count(old) != 1:
+              raise SystemExit('OpenAI capability assertion shape changed')
+          test = test.replace(old, new, 1)
+          old = '''                Backend::Anthropic => {\n                    assert_eq!(body["max_tokens"], CAPABILITY_PROBE_MAX_OUTPUT_TOKENS);\n'''
+          new = '''                Backend::Anthropic => {\n                    assert_eq!(body["model"], "test-model");\n                    assert_eq!(body["max_tokens"], CAPABILITY_PROBE_MAX_OUTPUT_TOKENS);\n'''
+          if test.count(old) != 1:
+              raise SystemExit('Anthropic capability assertion shape changed')
+          test = test.replace(old, new, 1)
+          old = '''                Backend::Gemini => {\n                    assert_eq!(\n'''
+          new = '''                Backend::Gemini => {\n                    assert!(body.get("model").is_none());\n                    assert_eq!(\n'''
+          if test.count(old) != 1:
+              raise SystemExit('Gemini capability assertion shape changed')
+          test = test.replace(old, new, 1)
+          rendered = rendered[:start] + test + rendered[end:]
+          http.write_text(rendered)
+          PY
+      - name: Format and validate final product code
+        run: |
+          rustup toolchain install 1.92.0 --profile minimal --component clippy --component rustfmt
+          rustup override set 1.92.0
+          pnpm exec prettier --write apps/web/app/setup/page.tsx
+          cargo fmt --all
+          pnpm format:check
+          pnpm lint
+          pnpm typecheck
+          cargo test -p nopager-providers -p nopager-server
+          cargo clippy --workspace --all-targets -- -D warnings
+      - name: Commit product code and remove temporary workflows
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            crates/nopager-providers/src/lib.rs \
+            crates/nopager-providers/src/http.rs \
+            apps/server/src/main.rs \
+            apps/web/app/setup/page.tsx
+          git rm \
+            .github/workflows/apply-provider-capability-probe.yml \
+            .github/workflows/finalize-provider-capability-probe.yml
+          git commit -m "Probe provider structured-output capability"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
