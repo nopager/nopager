@@ -49,6 +49,12 @@ jobs:
           end = source.index(end_marker, start)
           script = textwrap.dedent(source[start:end])
           exec(compile(script, 'model-discovery-transform', 'exec'), {'__name__': '__main__'})
+
+          page = Path('apps/web/app/setup/page.tsx')
+          rendered = page.read_text()
+          rendered = rendered.replace('              setProviderModels([]);\n', '', 1)
+          rendered = rendered.replace('            setProviderModels([]);\n', '', 1)
+          page.write_text(rendered)
           PY
       - name: Format and validate model discovery
         run: |
