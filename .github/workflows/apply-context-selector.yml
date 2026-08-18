@@ -1,0 +1,74 @@
+name: Apply minimum context selector
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event.pull_request.head.ref == 'privacy/minimum-context-selector' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+      - name: Apply local minimum-context selector
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('apps/worker/src/main.rs')
+          text = path.read_text()
+
+          def replace_once(old, new, label):
+              global text
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected once, found {count}')
+              text = text.replace(old, new, 1)
+
+          replace_once(
+              '''    AnthropicProvider, CommitContext, DiagnosisInput, DiagnosisResult, GeminiProvider,\n    ModelProvider, OpenAiProvider, RepairInput, RepairProposal, RiskLevel,\n''',
+              '''    AnthropicProvider, CommitContext, DiagnosisInput, DiagnosisResult, GeminiProvider,\n    ModelProvider, OpenAiProvider, RepairInput, RepairProposal, RiskLevel, SourceFile,\n''',
+              'SourceFile import',
+          )
+          replace_once(
+              'use tracing::{error, info};\n',
+              'use tracing::{error, info, warn};\n',
+              'warn import',
+          )
+          replace_once(
+              'use tracing_subscriber::EnvFilter;\n\n',
+              '''use tracing_subscriber::EnvFilter;\n\nconst MAX_SELECTED_SOURCE_FILES: usize = 8;\nconst MAX_SELECTED_SOURCE_FILE_BYTES: u64 = 256 * 1024;\nconst MAX_SELECTED_SOURCE_FILE_CHARS: usize = 16_000;\nconst MAX_SELECTED_SOURCE_TOTAL_CHARS: usize = 64_000;\nconst SOURCE_CONTEXT_TRUNCATED: &str = "\\n[TRUNCATED_BY_NOPAGER_CONTEXT_SELECTOR]";\n\n''',
+              'selector budgets',
+          )
+          old = '''    let (recent_commits, verified_repair_files) = if base_sha == "unknown" {\n        (Vec::new(), Vec::new())\n    } else {\n        let github = github_client(database, &work).await?;\n        let commit = github\n            .get_commit(&work.repo_owner, &work.repo_name, &base_sha)\n            .await?;\n        let verified_repair_files = commit.verified_diff_files.clone();\n        (\n            vec![CommitContext {\n                sha: commit.sha,\n                message: commit.message,\n                changed_files: commit.changed_files,\n            }],\n            verified_repair_files,\n        )\n    };\n    let provider = provider_for(database, work.project_id).await?;\n    let input = DiagnosisInput {\n        incident_summary: work.title.clone(),\n        recent_commits,\n        stack_trace: find_string(&work.trigger_context, &["stack", "stackTrace", "error"]),\n        deployment: work.deployment_context.clone(),\n        health_failure: work.trigger_context.clone(),\n        relevant_files: Vec::new(),\n        verified_repair_files,\n    };\n'''
+          new = '''    let (recent_commits, verified_repair_files, relevant_files) = if base_sha == "unknown" {\n        (Vec::new(), Vec::new(), Vec::new())\n    } else {\n        let github = github_client(database, &work).await?;\n        let commit = github\n            .get_commit(&work.repo_owner, &work.repo_name, &base_sha)\n            .await?;\n        let verified_repair_files = commit.verified_diff_files.clone();\n        let relevant_files = match collect_relevant_source_context(\n            &github,\n            &work.repo_owner,\n            &work.repo_name,\n            &base_sha,\n            incident_id,\n            &verified_repair_files,\n        )\n        .await\n        {\n            Ok(files) => files,\n            Err(error) => {\n                warn!(%incident_id, %error, "local source context unavailable; continuing with verified diff evidence");\n                Vec::new()\n            }\n        };\n        (\n            vec![CommitContext {\n                sha: commit.sha,\n                message: commit.message,\n                changed_files: commit.changed_files,\n            }],\n            verified_repair_files,\n            relevant_files,\n        )\n    };\n    let provider = provider_for(database, work.project_id).await?;\n    let input = DiagnosisInput {\n        incident_summary: work.title.clone(),\n        recent_commits,\n        stack_trace: find_string(&work.trigger_context, &["stack", "stackTrace", "error"]),\n        deployment: work.deployment_context.clone(),\n        health_failure: work.trigger_context.clone(),\n        relevant_files,\n        verified_repair_files,\n    };\n'''
+          replace_once(old, new, 'diagnosis context collection')
+
+          anchor = '''fn work_root() -> anyhow::Result<PathBuf> {\n'''
+          helper = '''async fn collect_relevant_source_context(\n    github: &nopager_connectors::github::GitHubClient,\n    owner: &str,\n    repository: &str,\n    base_sha: &str,\n    incident_id: uuid::Uuid,\n    candidates: &[String],\n) -> anyhow::Result<Vec<SourceFile>> {\n    if candidates.is_empty() {\n        return Ok(Vec::new());\n    }\n\n    let root = work_root()?;\n    let incident_root = root.join(incident_id.to_string());\n    std::fs::create_dir_all(&incident_root)?;\n    let workspace = incident_root.join("diagnosis-context");\n    if workspace.exists() {\n        let canonical = workspace.canonicalize()?;\n        if !canonical.starts_with(&root) {\n            anyhow::bail!("diagnosis context path escaped workspace root");\n        }\n        std::fs::remove_dir_all(canonical)?;\n    }\n    std::fs::create_dir_all(&workspace)?;\n\n    let result = match github\n        .download_archive(owner, repository, base_sha, &workspace)\n        .await\n    {\n        Ok(extracted) => select_source_files(&workspace, &extracted, candidates),\n        Err(error) => Err(anyhow::anyhow!("could not download exact base archive: {error}")),\n    };\n\n    if workspace.exists() {\n        let canonical = workspace.canonicalize()?;\n        if !canonical.starts_with(&root) {\n            anyhow::bail!("diagnosis context cleanup path escaped workspace root");\n        }\n        std::fs::remove_dir_all(canonical)?;\n    }\n    result\n}\n\nfn select_source_files(\n    workspace: &Path,\n    extracted: &[PathBuf],\n    candidates: &[String],\n) -> anyhow::Result<Vec<SourceFile>> {\n    let available: BTreeSet<PathBuf> = extracted.iter().cloned().collect();\n    let mut seen = BTreeSet::new();\n    let mut selected = Vec::new();\n    let mut total_chars = 0_usize;\n\n    for candidate in candidates {\n        if selected.len() >= MAX_SELECTED_SOURCE_FILES {\n            break;\n        }\n        if !seen.insert(candidate.clone()) || !source_context_path_allowed(candidate) {\n            continue;\n        }\n        let relative = PathBuf::from(candidate);\n        if !available.contains(&relative) {\n            continue;\n        }\n        let target = workspace.join(&relative);\n        let metadata = std::fs::metadata(&target)?;\n        if !metadata.is_file() || metadata.len() > MAX_SELECTED_SOURCE_FILE_BYTES {\n            continue;\n        }\n        let bytes = std::fs::read(&target)?;\n        let Ok(content) = String::from_utf8(bytes) else {\n            continue;\n        };\n        if content.contains('\\0') {\n            continue;\n        }\n        let remaining = MAX_SELECTED_SOURCE_TOTAL_CHARS.saturating_sub(total_chars);\n        if remaining == 0 {\n            break;\n        }\n        let content = bounded_source_content(\n            &content,\n            remaining.min(MAX_SELECTED_SOURCE_FILE_CHARS),\n        );\n        if content.is_empty() {\n            continue;\n        }\n        total_chars += content.chars().count();\n        selected.push(SourceFile {\n            path: candidate.clone(),\n            content,\n        });\n    }\n    Ok(selected)\n}\n\nfn bounded_source_content(value: &str, max_chars: usize) -> String {\n    if max_chars == 0 {\n        return String::new();\n    }\n    if value.chars().count() <= max_chars {\n        return value.to_owned();\n    }\n    let marker_chars = SOURCE_CONTEXT_TRUNCATED.chars().count();\n    if max_chars <= marker_chars {\n        return SOURCE_CONTEXT_TRUNCATED.chars().take(max_chars).collect();\n    }\n    let mut bounded = value\n        .chars()\n        .take(max_chars - marker_chars)\n        .collect::<String>();\n    bounded.push_str(SOURCE_CONTEXT_TRUNCATED);\n    bounded\n}\n\nfn source_context_path_allowed(path: &str) -> bool {\n    if path.is_empty()\n        || path.starts_with('/')\n        || path.contains('\\\\')\n        || path.chars().any(char::is_control)\n        || path\n            .split('/')\n            .any(|component| component.is_empty() || component == "." || component == "..")\n    {\n        return false;\n    }\n    let normalized = path.to_ascii_lowercase();\n    let file_name = normalized.rsplit('/').next().unwrap_or(&normalized);\n    if file_name == ".env"\n        || file_name.starts_with(".env.")\n        || matches!(\n            file_name,\n            ".npmrc"\n                | ".pypirc"\n                | ".netrc"\n                | "id_rsa"\n                | "id_dsa"\n                | "id_ed25519"\n                | "credentials"\n                | "credentials.json"\n                | "secrets.json"\n                | "secrets.yaml"\n                | "secrets.yml"\n        )\n    {\n        return false;\n    }\n    ![".pem", ".key", ".p12", ".pfx", ".jks", ".keystore"]\n        .iter()\n        .any(|extension| file_name.ends_with(extension))\n}\n\n'''
+          replace_once(anchor, helper + anchor, 'selector helpers')
+
+          test_anchor = '''    #[test]\n    fn safety_modes_are_explicit() {\n'''
+          tests = '''    #[test]\n    fn context_selector_only_reads_verified_candidate_files() {\n        let root = std::env::temp_dir().join(format!(\n            "nopager-context-selector-{}",\n            std::process::id()\n        ));\n        let _ = std::fs::remove_dir_all(&root);\n        std::fs::create_dir_all(root.join("src")).unwrap();\n        std::fs::write(root.join("src/app.rs"), "pub fn app() {}\\n").unwrap();\n        std::fs::write(root.join("src/unrelated.rs"), "do_not_send\\n").unwrap();\n        std::fs::write(root.join(".env"), "API_KEY=secret\\n").unwrap();\n\n        let extracted = vec![\n            PathBuf::from("src/app.rs"),\n            PathBuf::from("src/unrelated.rs"),\n            PathBuf::from(".env"),\n        ];\n        let selected = select_source_files(\n            &root,\n            &extracted,\n            &["src/app.rs".into(), ".env".into(), "missing.rs".into()],\n        )\n        .unwrap();\n\n        assert_eq!(selected.len(), 1);\n        assert_eq!(selected[0].path, "src/app.rs");\n        assert!(selected[0].content.contains("pub fn app"));\n        assert!(!selected[0].content.contains("do_not_send"));\n        let _ = std::fs::remove_dir_all(root);\n    }\n\n    #[test]\n    fn context_selector_bounds_source_and_rejects_binary_or_secret_artifacts() {\n        let root = std::env::temp_dir().join(format!(\n            "nopager-context-selector-bounds-{}",\n            std::process::id()\n        ));\n        let _ = std::fs::remove_dir_all(&root);\n        std::fs::create_dir_all(root.join("src")).unwrap();\n        std::fs::write(\n            root.join("src/large.ts"),\n            "x".repeat(MAX_SELECTED_SOURCE_FILE_CHARS + 1_000),\n        )\n        .unwrap();\n        std::fs::write(root.join("src/image.bin"), [0xff, 0xfe, 0xfd]).unwrap();\n        std::fs::write(root.join("private.pem"), "PRIVATE KEY").unwrap();\n\n        let extracted = vec![\n            PathBuf::from("src/large.ts"),\n            PathBuf::from("src/image.bin"),\n            PathBuf::from("private.pem"),\n        ];\n        let selected = select_source_files(\n            &root,\n            &extracted,\n            &[\n                "src/large.ts".into(),\n                "src/image.bin".into(),\n                "private.pem".into(),\n            ],\n        )\n        .unwrap();\n\n        assert_eq!(selected.len(), 1);\n        assert_eq!(selected[0].path, "src/large.ts");\n        assert!(selected[0].content.ends_with(SOURCE_CONTEXT_TRUNCATED));\n        assert!(selected[0].content.chars().count() <= MAX_SELECTED_SOURCE_FILE_CHARS);\n        assert!(!source_context_path_allowed(".env.production"));\n        assert!(!source_context_path_allowed("keys/server.key"));\n        assert!(!source_context_path_allowed("src\\\\escape.rs"));\n        let _ = std::fs::remove_dir_all(root);\n    }\n\n'''
+          replace_once(test_anchor, tests + test_anchor, 'selector tests')
+          path.write_text(text)
+          PY
+      - name: Format and validate selector
+        run: |
+          rustup toolchain install 1.92.0 --profile minimal --component clippy --component rustfmt
+          rustup override set 1.92.0
+          cargo fmt --all
+          cargo test -p nopager-worker
+          cargo clippy --workspace --all-targets -- -D warnings
+      - name: Commit selector
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/worker/src/main.rs
+          git diff --cached --quiet && { echo "No context-selector changes produced"; exit 1; }
+          git commit -m "Select minimum local source context"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
