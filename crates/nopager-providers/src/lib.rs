@@ -274,7 +274,9 @@ fn valid_email_domain(domain: &str) -> bool {
         }
         last = Some(label);
     }
-    last.is_some_and(|label| label.len() >= 2 && label.bytes().all(|byte| byte.is_ascii_alphabetic()))
+    last.is_some_and(|label| {
+        label.len() >= 2 && label.bytes().all(|byte| byte.is_ascii_alphabetic())
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -473,7 +475,8 @@ mod tests {
     #[test]
     fn model_inputs_redact_high_confidence_customer_pii() {
         let input = DiagnosisInput {
-            incident_summary: "checkout failed for alice@example.com while user.email was read".into(),
+            incident_summary: "checkout failed for alice@example.com while user.email was read"
+                .into(),
             recent_commits: vec![CommitContext {
                 sha: "abc123".into(),
                 message: "preserve user.email field semantics".into(),
