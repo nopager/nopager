@@ -573,7 +573,9 @@ function fields(
         />
         <GeneratedSecret
           value={data.githubWebhookSecret}
-          onRegenerate={() => update("githubWebhookSecret", generateWebhookSecret())}
+          onRegenerate={() =>
+            update("githubWebhookSecret", generateWebhookSecret())
+          }
         />
         <TextArea
           label="GitHub App private key (PEM)"
@@ -733,7 +735,9 @@ async function expectOk(response: Response) {
 function generateWebhookSecret() {
   const bytes = new Uint8Array(32);
   window.crypto.getRandomValues(bytes);
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
+    "",
+  );
 }
 
 function repositoryParts(value: string) {
@@ -743,7 +747,11 @@ function repositoryParts(value: string) {
     .replace(/\.git$/, "")
     .replace(/^\/+|\/+$/g, "");
   const parts = trimmed.split("/");
-  if (parts.length !== 2 || parts.some((part) => part.trim() === "")) return null;
+  if (
+    parts.length !== 2 ||
+    parts.some((part) => part.trim() === "")
+  )
+    return null;
   return { owner: parts[0], name: parts[1] };
 }
 
