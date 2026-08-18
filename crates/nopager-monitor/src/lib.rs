@@ -213,9 +213,7 @@ pub async fn check_http(
         .port_or_known_default()
         .ok_or(HttpCheckError::UnsupportedPort)?;
     let started = Instant::now();
-    let mut builder = reqwest::Client::builder()
-        .timeout(timeout)
-        .redirect(reqwest::redirect::Policy::none());
+    let mut builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
     if url
         .host()
         .is_some_and(|value| matches!(value, Host::Domain(_)))
@@ -237,7 +235,14 @@ pub async fn check_http(
         // a DNS-rebinding SSRF bypass.
         builder = builder.resolve_to_addrs(host, &resolved);
     }
-    let client = builder.build()?;
+    let remaining = timeout.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        return Ok(failed_observation(started, "timeout"));
+    }
+    let client = builder
+        .connect_timeout(remaining.min(Duration::from_secs(5)))
+        .timeout(remaining)
+        .build()?;
     let mut request = client.get(url.clone());
     // Vercel preview deployments are frequently protected. Vercel's official
     // automation bypass is intentionally injected only for *.vercel.app and
