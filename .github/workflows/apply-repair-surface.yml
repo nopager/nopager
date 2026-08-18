@@ -1,0 +1,81 @@
+name: Apply verified repair surface
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event.pull_request.head.ref == 'privacy/verified-repair-surface' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+      - name: Apply deterministic repair-surface guard
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          lib = Path('crates/nopager-providers/src/lib.rs')
+          text = lib.read_text()
+
+          replacements = []
+          replacements.append((
+              'use async_trait::async_trait;\n',
+              'use std::collections::BTreeSet;\n\nuse async_trait::async_trait;\n',
+          ))
+          replacements.append((
+              '''    #[must_use]\n    pub fn has_verified_source_context(&self) -> bool {\n        self.evidence.iter().any(|evidence| {\n            evidence.source == VERIFIED_GITHUB_DIFF_SOURCE && !evidence.finding.trim().is_empty()\n        })\n    }\n''',
+              '''    #[must_use]\n    pub fn has_verified_source_context(&self) -> bool {\n        self.evidence.iter().any(|evidence| {\n            evidence.source == VERIFIED_GITHUB_DIFF_SOURCE && !evidence.finding.trim().is_empty()\n        })\n    }\n\n    #[must_use]\n    pub fn verified_repair_files(&self) -> BTreeSet<String> {\n        let mut files = BTreeSet::new();\n        for evidence in &self.evidence {\n            if evidence.source != VERIFIED_GITHUB_DIFF_SOURCE {\n                continue;\n            }\n            for line in evidence.finding.lines() {\n                let Some(path) = line.strip_prefix("FILE: ") else {\n                    continue;\n                };\n                let normalized = path.trim().replace('\\\\', "/");\n                if validate_repair_path(&normalized).is_ok() {\n                    files.insert(normalized);\n                }\n            }\n        }\n        files\n    }\n''',
+          ))
+          replacements.append((
+              '''        if self.validation_commands.is_empty() {\n            return Err(OutputValidationError::MissingSafetyPlan);\n        }\n        Ok(())\n    }\n}\n''',
+              '''        if self.validation_commands.is_empty() {\n            return Err(OutputValidationError::MissingSafetyPlan);\n        }\n        Ok(())\n    }\n\n    pub fn validate_against_verified_source(\n        &self,\n        diagnosis: &DiagnosisResult,\n    ) -> Result<(), OutputValidationError> {\n        let allowed = diagnosis.verified_repair_files();\n        if allowed.is_empty() {\n            return Err(OutputValidationError::MissingVerifiedRepairSurface);\n        }\n        for path in &self.changed_files {\n            let normalized = path.replace('\\\\', "/");\n            if !allowed.contains(&normalized) {\n                return Err(OutputValidationError::UnverifiedRepairPath(path.to_owned()));\n            }\n        }\n        Ok(())\n    }\n}\n''',
+          ))
+          replacements.append((
+              '''        || normalized.contains(":")\n    {\n''',
+              '''        || normalized.contains(":")\n        || path.chars().any(char::is_control)\n    {\n''',
+          ))
+          replacements.append((
+              '''    #[error("model patch is empty, too large, or has no changed files")]\n    InvalidPatch,\n}\n''',
+              '''    #[error("model patch is empty, too large, or has no changed files")]\n    InvalidPatch,\n    #[error("verified GitHub evidence did not identify any safe repairable files")]\n    MissingVerifiedRepairSurface,\n    #[error("model attempted to modify a file outside verified source evidence: {0}")]\n    UnverifiedRepairPath(String),\n}\n''',
+          ))
+          replacements.append((
+              '''    #[test]\n    fn permits_normal_application_code_repairs() {\n        assert_eq!(valid_repair("src/login.ts").validate(), Ok(()));\n    }\n\n''',
+              '''    #[test]\n    fn permits_normal_application_code_repairs() {\n        assert_eq!(valid_repair("src/login.ts").validate(), Ok(()));\n    }\n\n    #[test]\n    fn derives_allowed_repair_surface_only_from_verified_file_markers() {\n        let mut diagnosis = valid_diagnosis();\n        diagnosis.evidence.push(Evidence {\n            source: VERIFIED_GITHUB_DIFF_SOURCE.to_owned(),\n            finding: "COMMIT abc123\\nFILE: src/checkout.rs\\n@@ -1 +1 @@\\n-old\\n+new\\nFILE: src/lib.rs\\n@@ -2 +2 @@".to_owned(),\n        });\n        diagnosis.evidence.push(Evidence {\n            source: "model".to_owned(),\n            finding: "FILE: src/not-verified.rs".to_owned(),\n        });\n\n        let allowed = diagnosis.verified_repair_files();\n        assert_eq!(\n            allowed,\n            BTreeSet::from(["src/checkout.rs".to_owned(), "src/lib.rs".to_owned()])\n        );\n    }\n\n    #[test]\n    fn repair_must_stay_inside_verified_source_surface() {\n        let mut diagnosis = valid_diagnosis();\n        diagnosis.evidence.push(Evidence {\n            source: VERIFIED_GITHUB_DIFF_SOURCE.to_owned(),\n            finding: "FILE: src/checkout.rs\\n@@ -1 +1 @@".to_owned(),\n        });\n\n        assert_eq!(\n            valid_repair("src/checkout.rs").validate_against_verified_source(&diagnosis),\n            Ok(())\n        );\n        assert_eq!(\n            valid_repair("src/unrelated.rs").validate_against_verified_source(&diagnosis),\n            Err(OutputValidationError::UnverifiedRepairPath(\n                "src/unrelated.rs".to_owned()\n            ))\n        );\n    }\n\n    #[test]\n    fn sensitive_or_malformed_verified_paths_do_not_expand_repair_surface() {\n        let mut diagnosis = valid_diagnosis();\n        diagnosis.evidence.push(Evidence {\n            source: VERIFIED_GITHUB_DIFF_SOURCE.to_owned(),\n            finding: "FILE: package.json\\nFILE: src/evil\\nname.rs".to_owned(),\n        });\n\n        assert!(diagnosis.verified_repair_files().is_empty());\n        assert_eq!(\n            valid_repair("src/checkout.rs").validate_against_verified_source(&diagnosis),\n            Err(OutputValidationError::MissingVerifiedRepairSurface)\n        );\n    }\n\n''',
+          ))
+
+          for old, new in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'lib.rs replacement expected once, found {count}: {old[:80]!r}')
+              text = text.replace(old, new, 1)
+          lib.write_text(text)
+
+          http = Path('crates/nopager-providers/src/http.rs')
+          text = http.read_text()
+          old = '''                result.validate()?;\n                Ok(result)\n            }\n        }\n'''
+          new = '''                result.validate()?;\n                result.validate_against_verified_source(&input.diagnosis)?;\n                Ok(result)\n            }\n        }\n'''
+          count = text.count(old)
+          if count != 1:
+              raise SystemExit(f'http.rs repair enforcement replacement expected once, found {count}')
+          http.write_text(text.replace(old, new, 1))
+          PY
+      - name: Format and validate provider crate
+        run: |
+          rustup toolchain install 1.92.0 --profile minimal --component clippy --component rustfmt
+          rustup override set 1.92.0
+          cargo fmt --all
+          cargo test -p nopager-providers
+          cargo clippy -p nopager-providers --all-targets -- -D warnings
+      - name: Commit guard
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/nopager-providers/src/lib.rs crates/nopager-providers/src/http.rs
+          git diff --cached --quiet && { echo "No repair-surface changes produced"; exit 1; }
+          git commit -m "Constrain repairs to verified evidence"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
