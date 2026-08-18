@@ -13,14 +13,20 @@ use nopager_monitor::check_http;
 use nopager_policy::{ActionRisk, PolicyContext, PolicyDecision, SafetyMode, decide};
 use nopager_providers::{
     AnthropicProvider, CommitContext, DiagnosisInput, DiagnosisResult, GeminiProvider,
-    ModelProvider, OpenAiProvider, RepairInput, RepairProposal, RiskLevel,
+    ModelProvider, OpenAiProvider, RepairInput, RepairProposal, RiskLevel, SourceFile,
 };
 use nopager_sandbox::{ControlledCommand, DockerSandbox, apply_unified_diff};
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
+
+const MAX_SELECTED_SOURCE_FILES: usize = 8;
+const MAX_SELECTED_SOURCE_FILE_BYTES: u64 = 256 * 1024;
+const MAX_SELECTED_SOURCE_FILE_CHARS: usize = 16_000;
+const MAX_SELECTED_SOURCE_TOTAL_CHARS: usize = 64_000;
+const SOURCE_CONTEXT_TRUNCATED: &str = "\n[TRUNCATED_BY_NOPAGER_CONTEXT_SELECTOR]";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -151,14 +157,30 @@ async fn process_diagnosis(database: &Database, payload: &Value) -> anyhow::Resu
         )
     })
     .unwrap_or_else(|| "unknown".into());
-    let (recent_commits, verified_repair_files) = if base_sha == "unknown" {
-        (Vec::new(), Vec::new())
+    let (recent_commits, verified_repair_files, relevant_files) = if base_sha == "unknown" {
+        (Vec::new(), Vec::new(), Vec::new())
     } else {
         let github = github_client(database, &work).await?;
         let commit = github
             .get_commit(&work.repo_owner, &work.repo_name, &base_sha)
             .await?;
         let verified_repair_files = commit.verified_diff_files.clone();
+        let relevant_files = match collect_relevant_source_context(
+            &github,
+            &work.repo_owner,
+            &work.repo_name,
+            &base_sha,
+            incident_id,
+            &verified_repair_files,
+        )
+        .await
+        {
+            Ok(files) => files,
+            Err(error) => {
+                warn!(%incident_id, %error, "local source context unavailable; continuing with verified diff evidence");
+                Vec::new()
+            }
+        };
         (
             vec![CommitContext {
                 sha: commit.sha,
@@ -166,6 +188,7 @@ async fn process_diagnosis(database: &Database, payload: &Value) -> anyhow::Resu
                 changed_files: commit.changed_files,
             }],
             verified_repair_files,
+            relevant_files,
         )
     };
     let provider = provider_for(database, work.project_id).await?;
@@ -175,7 +198,7 @@ async fn process_diagnosis(database: &Database, payload: &Value) -> anyhow::Resu
         stack_trace: find_string(&work.trigger_context, &["stack", "stackTrace", "error"]),
         deployment: work.deployment_context.clone(),
         health_failure: work.trigger_context.clone(),
-        relevant_files: Vec::new(),
+        relevant_files,
         verified_repair_files,
     };
     let diagnosis = provider.diagnose(&input).await?;
@@ -1132,6 +1155,158 @@ fn parse_safety_mode(value: &str) -> anyhow::Result<SafetyMode> {
     }
 }
 
+async fn collect_relevant_source_context(
+    github: &nopager_connectors::github::GitHubClient,
+    owner: &str,
+    repository: &str,
+    base_sha: &str,
+    incident_id: uuid::Uuid,
+    candidates: &[String],
+) -> anyhow::Result<Vec<SourceFile>> {
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let root = work_root()?;
+    let incident_root = root.join(incident_id.to_string());
+    std::fs::create_dir_all(&incident_root)?;
+    let workspace = incident_root.join("diagnosis-context");
+    if workspace.exists() {
+        let canonical = workspace.canonicalize()?;
+        if !canonical.starts_with(&root) {
+            anyhow::bail!("diagnosis context path escaped workspace root");
+        }
+        std::fs::remove_dir_all(canonical)?;
+    }
+    std::fs::create_dir_all(&workspace)?;
+
+    let result = match github
+        .download_archive(owner, repository, base_sha, &workspace)
+        .await
+    {
+        Ok(extracted) => select_source_files(&workspace, &extracted, candidates),
+        Err(error) => Err(anyhow::anyhow!(
+            "could not download exact base archive: {error}"
+        )),
+    };
+
+    if workspace.exists() {
+        let canonical = workspace.canonicalize()?;
+        if !canonical.starts_with(&root) {
+            anyhow::bail!("diagnosis context cleanup path escaped workspace root");
+        }
+        std::fs::remove_dir_all(canonical)?;
+    }
+    result
+}
+
+fn select_source_files(
+    workspace: &Path,
+    extracted: &[PathBuf],
+    candidates: &[String],
+) -> anyhow::Result<Vec<SourceFile>> {
+    let available: BTreeSet<PathBuf> = extracted.iter().cloned().collect();
+    let mut seen = BTreeSet::new();
+    let mut selected = Vec::new();
+    let mut total_chars = 0_usize;
+
+    for candidate in candidates {
+        if selected.len() >= MAX_SELECTED_SOURCE_FILES {
+            break;
+        }
+        if !seen.insert(candidate.clone()) || !source_context_path_allowed(candidate) {
+            continue;
+        }
+        let relative = PathBuf::from(candidate);
+        if !available.contains(&relative) {
+            continue;
+        }
+        let target = workspace.join(&relative);
+        let metadata = std::fs::metadata(&target)?;
+        if !metadata.is_file() || metadata.len() > MAX_SELECTED_SOURCE_FILE_BYTES {
+            continue;
+        }
+        let bytes = std::fs::read(&target)?;
+        let Ok(content) = String::from_utf8(bytes) else {
+            continue;
+        };
+        if content.contains('\0') {
+            continue;
+        }
+        let remaining = MAX_SELECTED_SOURCE_TOTAL_CHARS.saturating_sub(total_chars);
+        if remaining == 0 {
+            break;
+        }
+        let content =
+            bounded_source_content(&content, remaining.min(MAX_SELECTED_SOURCE_FILE_CHARS));
+        if content.is_empty() {
+            continue;
+        }
+        total_chars += content.chars().count();
+        selected.push(SourceFile {
+            path: candidate.clone(),
+            content,
+        });
+    }
+    Ok(selected)
+}
+
+fn bounded_source_content(value: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    if value.chars().count() <= max_chars {
+        return value.to_owned();
+    }
+    let marker_chars = SOURCE_CONTEXT_TRUNCATED.chars().count();
+    if max_chars <= marker_chars {
+        return SOURCE_CONTEXT_TRUNCATED.chars().take(max_chars).collect();
+    }
+    let mut bounded = value
+        .chars()
+        .take(max_chars - marker_chars)
+        .collect::<String>();
+    bounded.push_str(SOURCE_CONTEXT_TRUNCATED);
+    bounded
+}
+
+fn source_context_path_allowed(path: &str) -> bool {
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.contains('\\')
+        || path.chars().any(char::is_control)
+        || path
+            .split('/')
+            .any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        return false;
+    }
+    let normalized = path.to_ascii_lowercase();
+    let file_name = normalized.rsplit('/').next().unwrap_or(&normalized);
+    if file_name == ".env"
+        || file_name.starts_with(".env.")
+        || matches!(
+            file_name,
+            ".npmrc"
+                | ".pypirc"
+                | ".netrc"
+                | "id_rsa"
+                | "id_dsa"
+                | "id_ed25519"
+                | "credentials"
+                | "credentials.json"
+                | "secrets.json"
+                | "secrets.yaml"
+                | "secrets.yml"
+        )
+    {
+        return false;
+    }
+    ![".pem", ".key", ".p12", ".pfx", ".jks", ".keystore"]
+        .iter()
+        .any(|extension| file_name.ends_with(extension))
+}
+
 fn work_root() -> anyhow::Result<PathBuf> {
     let root = std::env::var_os("NOPAGER_WORK_ROOT")
         .map(PathBuf::from)
@@ -1718,6 +1893,77 @@ mod tests {
         assert_eq!(commands[0].arguments[1], "install");
         assert_eq!(commands[1].arguments[1], "build");
         assert_eq!(commands[2].arguments[1], "test");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn context_selector_only_reads_verified_candidate_files() {
+        let root =
+            std::env::temp_dir().join(format!("nopager-context-selector-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/app.rs"), "pub fn app() {}\n").unwrap();
+        std::fs::write(root.join("src/unrelated.rs"), "do_not_send\n").unwrap();
+        std::fs::write(root.join(".env"), "API_KEY=secret\n").unwrap();
+
+        let extracted = vec![
+            PathBuf::from("src/app.rs"),
+            PathBuf::from("src/unrelated.rs"),
+            PathBuf::from(".env"),
+        ];
+        let selected = select_source_files(
+            &root,
+            &extracted,
+            &["src/app.rs".into(), ".env".into(), "missing.rs".into()],
+        )
+        .unwrap();
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].path, "src/app.rs");
+        assert!(selected[0].content.contains("pub fn app"));
+        assert!(!selected[0].content.contains("do_not_send"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn context_selector_bounds_source_and_rejects_binary_or_secret_artifacts() {
+        let root = std::env::temp_dir().join(format!(
+            "nopager-context-selector-bounds-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/large.ts"),
+            "x".repeat(MAX_SELECTED_SOURCE_FILE_CHARS + 1_000),
+        )
+        .unwrap();
+        std::fs::write(root.join("src/image.bin"), [0xff, 0xfe, 0xfd]).unwrap();
+        std::fs::write(root.join("private.pem"), "PRIVATE KEY").unwrap();
+
+        let extracted = vec![
+            PathBuf::from("src/large.ts"),
+            PathBuf::from("src/image.bin"),
+            PathBuf::from("private.pem"),
+        ];
+        let selected = select_source_files(
+            &root,
+            &extracted,
+            &[
+                "src/large.ts".into(),
+                "src/image.bin".into(),
+                "private.pem".into(),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].path, "src/large.ts");
+        assert!(selected[0].content.ends_with(SOURCE_CONTEXT_TRUNCATED));
+        assert!(selected[0].content.chars().count() <= MAX_SELECTED_SOURCE_FILE_CHARS);
+        assert!(!source_context_path_allowed(".env.production"));
+        assert!(!source_context_path_allowed("keys/server.key"));
+        assert!(!source_context_path_allowed("src\\escape.rs"));
         let _ = std::fs::remove_dir_all(root);
     }
 
