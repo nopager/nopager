@@ -216,7 +216,7 @@ impl HttpProvider {
             Backend::Gemini => {
                 let body = json!({
                     "systemInstruction": { "parts": [{ "text": SYSTEM_PROMPT }] },
-                    "contents": [{ "role": "user", "parts": [{ "text": prompt } }],
+                    "contents": [{ "role": "user", "parts": [{ "text": prompt }] }],
                     "generationConfig": { "responseMimeType": "application/json", "responseJsonSchema": schema }
                 });
                 let path = format!("v1beta/models/{}:generateContent", self.model);
@@ -385,7 +385,9 @@ fn looks_like_secret_literal(value: &str) -> bool {
     if value.is_empty() {
         return false;
     }
-    if value.starts_with(['\'', '"', '`'])
+    if value.starts_with('\'')
+        || value.starts_with('"')
+        || value.starts_with('`')
         || value.starts_with("Bearer ")
         || value.starts_with("Basic ")
     {
