@@ -116,6 +116,8 @@ export default function SetupPage() {
   const [githubMode, setGitHubMode] = useState<GitHubMode>("automatic");
   const [manifestStage, setManifestStage] = useState<ManifestStage>("idle");
   const [manifestAppUrl, setManifestAppUrl] = useState("");
+  const [discoveringHealth, setDiscoveringHealth] = useState(false);
+  const [healthDiscoveryMessage, setHealthDiscoveryMessage] = useState("");
 
   useEffect(() => {
     fetch("/api/nopager/setup/status", { cache: "no-store" })
@@ -279,6 +281,7 @@ export default function SetupPage() {
   }
 
   function updateProductionUrl(value: string) {
+    setHealthDiscoveryMessage("");
     setData((current) => ({
       ...current,
       productionUrl: value,
@@ -288,6 +291,40 @@ export default function SetupPage() {
           ? value
           : current.healthCheckUrl,
     }));
+  }
+
+  async function discoverHealth() {
+    if (!data.productionUrl.trim()) {
+      setError("Enter the production URL first.");
+      return;
+    }
+    setDiscoveringHealth(true);
+    setHealthDiscoveryMessage("");
+    setError("");
+    try {
+      const response = await fetch("/api/nopager/setup/discover/health", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ productionUrl: data.productionUrl }),
+      });
+      const result = await expectJson<{
+        found: boolean;
+        url?: string;
+        attempted: number;
+      }>(response);
+      if (result.found && result.url) {
+        update("healthCheckUrl", result.url);
+        setHealthDiscoveryMessage(`Detected ${result.url}`);
+      } else {
+        setHealthDiscoveryMessage(
+          `No standard health endpoint returned HTTP 200 (${result.attempted} safe paths checked). Enter your app's health URL manually.`,
+        );
+      }
+    } catch (reason) {
+      setError(message(reason));
+    } finally {
+      setDiscoveringHealth(false);
+    }
   }
 
   function startGitHubManifest() {
@@ -515,6 +552,9 @@ export default function SetupPage() {
           startGitHubManifest,
           useManualGitHubSetup,
           useAutomaticGitHubSetup,
+          discoverHealth,
+          discoveringHealth,
+          healthDiscoveryMessage,
         )}
         {error && (
           <p className="form-error full" role="alert">
@@ -739,6 +779,9 @@ function fields(
   startGitHubManifest: () => void,
   useManualGitHubSetup: () => void,
   useAutomaticGitHubSetup: () => void,
+  discoverHealth: () => void,
+  discoveringHealth: boolean,
+  healthDiscoveryMessage: string,
 ) {
   if (step === 0) {
     return (
@@ -991,6 +1034,19 @@ function fields(
           onChange={updateProductionUrl}
           placeholder="https://example.com"
         />
+        <div className="full">
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={discoverHealth}
+            disabled={discoveringHealth || !data.productionUrl.trim()}
+          >
+            {discoveringHealth
+              ? "Checking safe paths…"
+              : "Find health endpoint"}
+          </button>
+          {healthDiscoveryMessage && <small>{healthDiscoveryMessage}</small>}
+        </div>
         <Input
           full
           label="Health check URL"
