@@ -309,9 +309,7 @@ fn redact_private_key_blocks(value: &str) -> String {
     let mut output = Vec::new();
     let mut inside_private_key = false;
     for line in value.lines() {
-        if !inside_private_key
-            && line.contains("-----BEGIN ")
-            && line.contains("PRIVATE KEY-----")
+        if !inside_private_key && line.contains("-----BEGIN ") && line.contains("PRIVATE KEY-----")
         {
             output.push(REDACTED_PRIVATE_KEY.to_owned());
             inside_private_key = true;
@@ -349,8 +347,10 @@ fn redact_sensitive_assignment(line: &str) -> String {
                 || character.is_ascii_digit()
                 || matches!(character, '_' | '-' | '.')
         });
-    let header_like = matches!(normalized.as_str(), "authorization" | "cookie" | "setcookie")
-        || normalized.contains("apikey");
+    let header_like = matches!(
+        normalized.as_str(),
+        "authorization" | "cookie" | "setcookie"
+    ) || normalized.contains("apikey");
     if env_like || header_like || looks_like_secret_literal(rhs) {
         format!("{}{} {REDACTED}", lhs.trim_end(), separator)
     } else {
@@ -426,7 +426,10 @@ fn redact_url_credentials(value: &str) -> String {
                 .find_map(|(offset, character)| {
                     (offset > 0
                         && (character.is_whitespace()
-                            || matches!(character, '\'' | '"' | '<' | '>' | ')' | ']' | '}' | ',' | ';')))
+                            || matches!(
+                                character,
+                                '\'' | '"' | '<' | '>' | ')' | ']' | '}' | ',' | ';'
+                            )))
                     .then_some(start + offset)
                 })
                 .unwrap_or(output.len());
