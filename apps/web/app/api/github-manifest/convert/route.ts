@@ -16,7 +16,10 @@ function privateNoStoreHeaders() {
 }
 
 function jsonError(error: string, status: number) {
-  return Response.json({ error }, { status, headers: privateNoStoreHeaders() });
+  return Response.json(
+    { error },
+    { status, headers: privateNoStoreHeaders() },
+  );
 }
 
 function sameOrigin(request: NextRequest) {
@@ -48,7 +51,8 @@ async function authenticated(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  if (!sameOrigin(request)) return jsonError("cross_origin_mutation_blocked", 403);
+  if (!sameOrigin(request))
+    return jsonError("cross_origin_mutation_blocked", 403);
   if (!(await authenticated(request))) return jsonError("unauthorized", 401);
 
   const bounded = await readBoundedBody(request, MAX_BODY_BYTES);
@@ -56,8 +60,14 @@ export async function POST(request: NextRequest) {
 
   let code: string;
   try {
-    const body = JSON.parse(new TextDecoder().decode(bounded)) as { code?: unknown };
-    if (typeof body.code !== "string" || body.code.length < 10 || body.code.length > 256) {
+    const body = JSON.parse(new TextDecoder().decode(bounded)) as {
+      code?: unknown;
+    };
+    if (
+      typeof body.code !== "string" ||
+      body.code.length < 10 ||
+      body.code.length > 256
+    ) {
       return jsonError("invalid_manifest_code", 400);
     }
     code = body.code;
