@@ -359,7 +359,13 @@ impl GitHubClient {
             .send()
             .await?;
         let branch_exists = if existing_ref.status().is_success() {
-            let _: GitRefResponse = decode(existing_ref).await?;
+            let existing: GitRefResponse = decode(existing_ref).await?;
+            if existing.object.sha.trim().is_empty() {
+                return Err(ConnectorError::Api {
+                    status: reqwest::StatusCode::BAD_GATEWAY,
+                    message: "GitHub ref response omitted object SHA".into(),
+                });
+            }
             true
         } else if existing_ref.status() == reqwest::StatusCode::NOT_FOUND {
             false
