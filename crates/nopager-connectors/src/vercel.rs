@@ -1,14 +1,16 @@
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
 use reqwest::{Client, Method, RequestBuilder};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use url::Url;
 
 use crate::{ConnectorError, decode, expect_success};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const PREVIEW_SECRETS_OVERRIDE: &str = "NOPAGER_ALLOW_PREVIEW_SECRETS";
 
 #[derive(Clone)]
 pub struct VercelClient {
@@ -46,6 +48,24 @@ pub struct DeploymentList {
 pub struct ProjectDetails {
     pub id: String,
     pub name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectEnvironmentVariable {
+    pub key: String,
+    #[serde(default)]
+    pub target: Vec<String>,
+    #[serde(default, rename = "type")]
+    pub variable_type: Option<String>,
+    #[serde(default)]
+    pub git_branch: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectEnvironmentVariableList {
+    #[serde(default)]
+    envs: Vec<ProjectEnvironmentVariable>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -146,6 +166,23 @@ impl VercelClient {
         Ok(decode::<DeploymentList>(response).await?.deployments)
     }
 
+    pub async fn list_environment_variables(
+        &self,
+        project_id_or_name: &str,
+    ) -> Result<Vec<ProjectEnvironmentVariable>, ConnectorError> {
+        validate_id(project_id_or_name)?;
+        let response = self
+            .request(
+                Method::GET,
+                &format!("v9/projects/{project_id_or_name}/env"),
+            )?
+            .send()
+            .await?;
+        Ok(decode::<ProjectEnvironmentVariableList>(response)
+            .await?
+            .envs)
+    }
+
     pub async fn create_preview(
         &self,
         project_name: &str,
@@ -157,11 +194,15 @@ impl VercelClient {
                 "only GitHub gitSource is supported".into(),
             ));
         }
-        let payload = serde_json::json!({
-            "name": project_name,
-            "target": null,
-            "gitSource": { "type": source.kind, "repoId": source.repo_id, "ref": source.ref_name, "sha": source.sha }
-        });
+        let environment_variables = self.list_environment_variables(project_name).await?;
+        let risky = effective_sensitive_preview_keys(&environment_variables, &source.ref_name);
+        if !risky.is_empty() && !preview_secrets_explicitly_allowed() {
+            return Err(ConnectorError::InvalidConfiguration(format!(
+                "Vercel Preview exposes sensitive-looking environment variables to AI-authored code: {}. Configure Preview with non-production, low-privilege credentials and then set {PREVIEW_SECRETS_OVERRIDE}=true to acknowledge the reviewed Preview boundary",
+                risky.join(", ")
+            )));
+        }
+        let payload = preview_payload(project_name, source);
         decode(
             self.request(Method::POST, "v13/deployments")?
                 .json(&payload)
@@ -210,6 +251,89 @@ impl VercelClient {
     }
 }
 
+fn preview_payload(project_name: &str, source: &GitSource) -> Value {
+    json!({
+        "name": project_name,
+        "target": "preview",
+        "gitSource": { "type": source.kind, "repoId": source.repo_id, "ref": source.ref_name, "sha": source.sha }
+    })
+}
+
+fn effective_sensitive_preview_keys(
+    variables: &[ProjectEnvironmentVariable],
+    branch: &str,
+) -> Vec<String> {
+    let mut effective = BTreeMap::<String, &ProjectEnvironmentVariable>::new();
+    for variable in variables {
+        if !variable
+            .target
+            .iter()
+            .any(|target| target.eq_ignore_ascii_case("preview"))
+        {
+            continue;
+        }
+        match variable.git_branch.as_deref() {
+            None => {
+                effective.entry(variable.key.clone()).or_insert(variable);
+            }
+            Some(configured_branch) if configured_branch == branch => {
+                effective.insert(variable.key.clone(), variable);
+            }
+            Some(_) => {}
+        }
+    }
+    effective
+        .into_values()
+        .filter(|variable| preview_variable_is_sensitive(variable))
+        .map(|variable| variable.key.clone())
+        .collect()
+}
+
+fn preview_variable_is_sensitive(variable: &ProjectEnvironmentVariable) -> bool {
+    if variable
+        .variable_type
+        .as_deref()
+        .is_some_and(|kind| kind.eq_ignore_ascii_case("sensitive"))
+    {
+        return true;
+    }
+    let key = variable
+        .key
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .map(|character| character.to_ascii_uppercase())
+        .collect::<String>();
+    let public_by_design = variable.key.starts_with("NEXT_PUBLIC_")
+        || variable.key.starts_with("VITE_")
+        || variable.key.starts_with("PUBLIC_");
+    !public_by_design
+        && [
+            "PASSWORD",
+            "SECRET",
+            "TOKEN",
+            "APIKEY",
+            "PRIVATEKEY",
+            "DATABASEURL",
+            "DBURL",
+            "REDISURL",
+            "CONNECTIONSTRING",
+            "CREDENTIAL",
+            "AUTHKEY",
+            "SIGNINGKEY",
+            "ENCRYPTIONKEY",
+            "COOKIESECRET",
+            "DSN",
+        ]
+        .iter()
+        .any(|marker| key.contains(marker))
+}
+
+fn preview_secrets_explicitly_allowed() -> bool {
+    std::env::var(PREVIEW_SECRETS_OVERRIDE)
+        .ok()
+        .is_some_and(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+}
+
 fn normalize_current_target(mut deployment: Deployment) -> Deployment {
     // `target=production` identifies the deployment environment. It does not mean
     // the deployment is still the one serving production traffic. Vercel's v13
@@ -248,6 +372,15 @@ mod tests {
         }
     }
 
+    fn env(key: &str, target: &[&str], git_branch: Option<&str>) -> ProjectEnvironmentVariable {
+        ProjectEnvironmentVariable {
+            key: key.into(),
+            target: target.iter().map(ToString::to_string).collect(),
+            variable_type: Some("encrypted".into()),
+            git_branch: git_branch.map(ToOwned::to_owned),
+        }
+    }
+
     #[test]
     fn rejects_path_in_identifier() {
         assert!(validate_id("prj_123").is_ok());
@@ -260,6 +393,61 @@ mod tests {
         let client = VercelClient::new(SecretString::from("token".to_owned()), Some("   ".into()))
             .expect("valid client");
         assert!(client.team_id.is_none());
+    }
+
+    #[test]
+    fn preview_payload_is_explicitly_preview() {
+        let source = GitSource {
+            kind: "github".into(),
+            repo_id: 42,
+            ref_name: "nopager/incident-abcd-repair".into(),
+            sha: "abc123".into(),
+        };
+        let payload = preview_payload("demo", &source);
+        assert_eq!(payload["target"], "preview");
+        assert_eq!(payload["gitSource"]["ref"], source.ref_name);
+    }
+
+    #[test]
+    fn sensitive_preview_keys_are_blocked_by_default() {
+        let variables = vec![
+            env("DATABASE_URL", &["preview"], None),
+            env("NEXT_PUBLIC_API_URL", &["preview"], None),
+            env("PRODUCTION_TOKEN", &["production"], None),
+            env("OTHER_BRANCH_SECRET", &["preview"], Some("feature/other")),
+        ];
+        assert_eq!(
+            effective_sensitive_preview_keys(&variables, "nopager/incident-123-repair"),
+            vec!["DATABASE_URL"]
+        );
+    }
+
+    #[test]
+    fn matching_branch_override_replaces_general_preview_value() {
+        let variables = vec![
+            env("DATABASE_URL", &["preview"], None),
+            ProjectEnvironmentVariable {
+                key: "DATABASE_URL".into(),
+                target: vec!["preview".into()],
+                variable_type: Some("plain".into()),
+                git_branch: Some("nopager/incident-123-repair".into()),
+            },
+        ];
+        assert_eq!(
+            effective_sensitive_preview_keys(&variables, "nopager/incident-123-repair"),
+            vec!["DATABASE_URL"]
+        );
+    }
+
+    #[test]
+    fn sensitive_vercel_type_is_blocked_even_with_innocent_key() {
+        let variable = ProjectEnvironmentVariable {
+            key: "BACKEND_VALUE".into(),
+            target: vec!["preview".into()],
+            variable_type: Some("sensitive".into()),
+            git_branch: None,
+        };
+        assert!(preview_variable_is_sensitive(&variable));
     }
 
     #[test]
