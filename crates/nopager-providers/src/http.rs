@@ -369,10 +369,7 @@ fn first_assignment_separator(line: &str) -> Option<(usize, char)> {
 }
 
 fn assignment_key(lhs: &str) -> String {
-    let trimmed = lhs
-        .trim()
-        .trim_start_matches(|character| character == '+' || character == '-')
-        .trim();
+    let trimmed = lhs.trim().trim_start_matches(['+', '-']).trim();
     let candidate = trimmed.split_whitespace().last().unwrap_or(trimmed);
     candidate
         .trim_matches(|character: char| {
@@ -393,16 +390,15 @@ fn looks_like_secret_literal(value: &str) -> bool {
     {
         return true;
     }
-    if let Ok(url) = Url::parse(value) {
-        if !url.username().is_empty() || url.password().is_some() {
-            return true;
-        }
+    if let Ok(url) = Url::parse(value)
+        && (!url.username().is_empty() || url.password().is_some())
+    {
+        return true;
     }
-    let token_like = !value.chars().any(char::is_whitespace)
+    !value.chars().any(char::is_whitespace)
         && value.len() >= 8
         && !value.contains('(')
-        && !value.contains("::");
-    token_like
+        && !value.contains("::")
 }
 
 fn redact_url_credentials(value: &str) -> String {
