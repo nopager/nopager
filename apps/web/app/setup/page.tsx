@@ -73,7 +73,8 @@ const setupErrors: Record<string, string> = {
     "One or more required setup values are missing or invalid. Return to the earlier step and verify each connection.",
   app_already_protected:
     "This NoPager Alpha installation already protects an app. The current open-source Alpha supports one protected app per installation.",
-  unauthorized: "Your local admin session expired. Sign in again and continue setup.",
+  unauthorized:
+    "Your local admin session expired. Sign in again and continue setup.",
 };
 
 export default function SetupPage() {
@@ -478,11 +479,11 @@ function GeneratedSecret({
       <input readOnly value={value} autoComplete="off" spellCheck={false} />
       <small>
         Generated locally in your browser. Copy this exact value into the GitHub
-        App webhook secret field. {" "}
+        App webhook secret field.{" "}
         <button type="button" className="text-link" onClick={copy}>
           {copied ? "Copied" : "Copy secret"}
         </button>{" "}
-        · {" "}
+        ·{" "}
         <button type="button" className="text-link" onClick={onRegenerate}>
           Regenerate
         </button>
@@ -529,7 +530,7 @@ function fields(
         <SetupNote title="One GitHub App, one repository">
           Create a GitHub App with Contents and Pull requests read/write plus
           Actions read-only, install it only on the repository you want NoPager
-          to protect, then paste the App values below. {" "}
+          to protect, then paste the App values below.{" "}
           <a
             className="text-link"
             href="https://github.com/nopager/nopager/blob/main/docs/GITHUB_APP_SETUP.md"
@@ -747,10 +748,7 @@ function repositoryParts(value: string) {
     .replace(/\.git$/, "")
     .replace(/^\/+|\/+$/g, "");
   const parts = trimmed.split("/");
-  if (
-    parts.length !== 2 ||
-    parts.some((part) => part.trim() === "")
-  )
+  if (parts.length !== 2 || parts.some((part) => part.trim() === ""))
     return null;
   return { owner: parts[0], name: parts[1] };
 }
