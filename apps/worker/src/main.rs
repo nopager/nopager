@@ -9,33 +9,32 @@ use tracing_subscriber::EnvFilter;
 mod production;
 
 // Keep the already-validated incident pipeline byte-for-byte intact while the
-// production boundary is separated into durable source/deployment orchestration.
-// This compatibility module can be split into normal Rust modules after the
-// Design Partner Alpha proves the new production path against real providers.
+// production durability boundary is separated into a small orchestration layer.
 #[allow(dead_code)]
 mod legacy {
-    include!("legacy_pipeline.rs");
-
-    pub(super) async fn execute_job_public(database: &Database, job: &Job) -> anyhow::Result<()> {
+    pub(super) async fn execute_job_public(
+        database: &nopager_db::Database,
+        job: &nopager_db::Job,
+    ) -> anyhow::Result<()> {
         execute_job(database, job).await
     }
 
     pub(super) async fn github_client_public(
-        database: &Database,
+        database: &nopager_db::Database,
         work: &nopager_db::IncidentWork,
     ) -> anyhow::Result<nopager_connectors::github::GitHubClient> {
         github_client(database, work).await
     }
 
     pub(super) async fn vercel_client_public(
-        database: &Database,
+        database: &nopager_db::Database,
         work: &nopager_db::IncidentWork,
     ) -> anyhow::Result<nopager_connectors::vercel::VercelClient> {
         vercel_client(database, work).await
     }
 
     pub(super) async fn begin_rollback_public(
-        database: &Database,
+        database: &nopager_db::Database,
         work: &nopager_db::IncidentWork,
         incident_id: uuid::Uuid,
         attempt_id: uuid::Uuid,
@@ -45,7 +44,7 @@ mod legacy {
     }
 
     pub(super) async fn enqueue_cleanup_public(
-        database: &Database,
+        database: &nopager_db::Database,
         incident_id: uuid::Uuid,
         attempt_id: uuid::Uuid,
     ) -> anyhow::Result<()> {
@@ -55,10 +54,12 @@ mod legacy {
     pub(super) async fn require_healthy_public(value: &str) -> anyhow::Result<()> {
         require_healthy(value).await
     }
+
+    include!("legacy_pipeline.rs");
 }
 
-const MAX_PRODUCTION_DISCOVERY_POLLS: u64 = 60;
-const PRODUCTION_DISCOVERY_DELAY_SECONDS: i64 = 10;
+const MAX_DURABLE_DEPLOYMENT_POLLS: u64 = 60;
+const DURABLE_DEPLOYMENT_POLL_SECONDS: i64 = 10;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -112,22 +113,163 @@ async fn main() -> anyhow::Result<()> {
 async fn execute_job(database: &Database, job: &Job) -> anyhow::Result<()> {
     match job.job_type.as_str() {
         "production-action"
-            if job.payload_json.get("action").and_then(Value::as_str) == Some("promote") =>
+            if job.payload_json.get("action").and_then(Value::as_str) == Some("land-repair") =>
         {
-            process_durable_production_action(database, &job.payload_json).await
+            persist_verified_repair(database, &job.payload_json).await
         }
         "verify" if job.payload_json.get("phase").and_then(Value::as_str) == Some("production") => {
+            verify_promoted_production(database, &job.payload_json).await
+        }
+        "verify"
+            if job.payload_json.get("phase").and_then(Value::as_str)
+                == Some("durable-production") =>
+        {
             verify_durable_production(database, &job.payload_json).await
         }
-        "post-deploy-watch" => watch_durable_production(database, &job.payload_json).await,
+        "post-deploy-watch"
+            if job.payload_json.get("phase").and_then(Value::as_str)
+                == Some("durable-production") =>
+        {
+            watch_durable_production(database, &job.payload_json).await
+        }
+        "post-deploy-watch" => watch_promoted_production(database, &job.payload_json).await,
         _ => legacy::execute_job_public(database, job).await,
     }
 }
 
-async fn process_durable_production_action(
-    database: &Database,
-    payload: &Value,
-) -> anyhow::Result<()> {
+async fn verify_promoted_production(database: &Database, payload: &Value) -> anyhow::Result<()> {
+    let incident_id = required_string(payload, "incidentId")?.parse()?;
+    let attempt_id = required_string(payload, "attemptId")?.parse()?;
+    let work = database.incident_work(incident_id).await?;
+    if work.state != IncidentState::VerifyingProduction {
+        return Ok(());
+    }
+    let attempt = database.repair_attempt(attempt_id).await?;
+    let deployment_id = attempt
+        .preview_deployment_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("promoted deployment id is missing"))?;
+    let commit_sha = attempt
+        .repair_commit_sha
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("repair commit SHA is missing"))?;
+    let vercel = legacy::vercel_client_public(database, &work).await?;
+
+    if let Err(error) =
+        production::verify_current_production(&vercel, deployment_id, commit_sha).await
+    {
+        legacy::begin_rollback_public(database, &work, incident_id, attempt_id, &error.to_string())
+            .await?;
+        return Ok(());
+    }
+    if let Err(error) = legacy::require_healthy_public(&work.health_check_url).await {
+        legacy::begin_rollback_public(database, &work, incident_id, attempt_id, &error.to_string())
+            .await?;
+        return Ok(());
+    }
+
+    database
+        .enqueue_after(
+            JobType::PostDeployWatch,
+            &format!("incident:{incident_id}:watch:0"),
+            Some(incident_id),
+            &json!({
+                "incidentId": incident_id,
+                "attemptId": attempt_id,
+                "check": 0,
+                "phase": "promoted-production"
+            }),
+            3,
+            10,
+        )
+        .await?;
+    Ok(())
+}
+
+async fn watch_promoted_production(database: &Database, payload: &Value) -> anyhow::Result<()> {
+    let incident_id = required_string(payload, "incidentId")?.parse()?;
+    let attempt_id = required_string(payload, "attemptId")?.parse()?;
+    let check = required_check(payload)?;
+    let work = database.incident_work(incident_id).await?;
+    if work.state != IncidentState::VerifyingProduction {
+        return Ok(());
+    }
+    let attempt = database.repair_attempt(attempt_id).await?;
+    let deployment_id = attempt
+        .preview_deployment_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("promoted deployment id is missing"))?;
+    let commit_sha = attempt
+        .repair_commit_sha
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("repair commit SHA is missing"))?;
+    let vercel = legacy::vercel_client_public(database, &work).await?;
+
+    if let Err(error) =
+        production::verify_current_production(&vercel, deployment_id, commit_sha).await
+    {
+        legacy::begin_rollback_public(database, &work, incident_id, attempt_id, &error.to_string())
+            .await?;
+        return Ok(());
+    }
+    if let Err(error) = legacy::require_healthy_public(&work.health_check_url).await {
+        legacy::begin_rollback_public(database, &work, incident_id, attempt_id, &error.to_string())
+            .await?;
+        return Ok(());
+    }
+
+    if check < 2 {
+        let next = check + 1;
+        database
+            .enqueue_after(
+                JobType::PostDeployWatch,
+                &format!("incident:{incident_id}:watch:{next}"),
+                Some(incident_id),
+                &json!({
+                    "incidentId": incident_id,
+                    "attemptId": attempt_id,
+                    "check": next,
+                    "phase": "promoted-production"
+                }),
+                3,
+                10,
+            )
+            .await?;
+        return Ok(());
+    }
+
+    database
+        .mark_deployment_known_good(work.project_id, deployment_id)
+        .await?;
+    database
+        .record_audit_event(
+            work.project_id,
+            Some(incident_id),
+            "worker",
+            "vercel.production.verified",
+            deployment_id,
+            "success",
+            &json!({ "commitSha": commit_sha, "checks": 3 }),
+        )
+        .await?;
+    database
+        .enqueue(
+            JobType::ProductionAction,
+            &format!("incident:{incident_id}:land-repair:0"),
+            Some(incident_id),
+            &json!({
+                "incidentId": incident_id,
+                "attemptId": attempt_id,
+                "action": "land-repair",
+                "poll": 0
+            }),
+            3,
+        )
+        .await?;
+    Ok(())
+}
+
+async fn persist_verified_repair(database: &Database, payload: &Value) -> anyhow::Result<()> {
     let incident_id = required_string(payload, "incidentId")?.parse()?;
     let attempt_id = required_string(payload, "attemptId")?.parse()?;
     let poll = payload.get("poll").and_then(Value::as_u64).unwrap_or(0);
@@ -142,17 +284,18 @@ async fn process_durable_production_action(
                     expected: work.state,
                     next: IncidentState::Paused,
                     actor: "worker".into(),
-                    message: "Protection paused before durable production mutation".into(),
+                    message: "Protection paused before persisting the verified production repair"
+                        .into(),
                     metadata: json!({}),
                 })
                 .await?;
         }
         return Ok(());
     }
-    if work.state != IncidentState::ProductionDeploying {
+    if work.state != IncidentState::VerifyingProduction {
         return Ok(());
     }
-    if poll > MAX_PRODUCTION_DISCOVERY_POLLS {
+    if poll > MAX_DURABLE_DEPLOYMENT_POLLS {
         anyhow::bail!("timed out waiting for the merged repair to become current production");
     }
 
@@ -185,16 +328,16 @@ async fn process_durable_production_action(
             database
                 .enqueue_after(
                     JobType::ProductionAction,
-                    &format!("incident:{incident_id}:production:{next}"),
+                    &format!("incident:{incident_id}:land-repair:{next}"),
                     Some(incident_id),
                     &json!({
                         "incidentId": incident_id,
                         "attemptId": attempt_id,
-                        "action": "promote",
+                        "action": "land-repair",
                         "poll": next
                     }),
                     3,
-                    PRODUCTION_DISCOVERY_DELAY_SECONDS,
+                    DURABLE_DEPLOYMENT_POLL_SECONDS,
                 )
                 .await?;
         }
@@ -235,29 +378,14 @@ async fn process_durable_production_action(
                 )
                 .await?;
             database
-                .transition_incident(IncidentTransition {
-                    project_id: work.project_id,
-                    incident_id,
-                    expected: IncidentState::ProductionDeploying,
-                    next: IncidentState::VerifyingProduction,
-                    actor: "worker".into(),
-                    message: "Verified repair merged; matching production deployment is current"
-                        .into(),
-                    metadata: json!({
-                        "deploymentId": deployment.id,
-                        "commitSha": deployment.commit_sha
-                    }),
-                })
-                .await?;
-            database
                 .enqueue_after(
                     JobType::Verify,
-                    &format!("incident:{incident_id}:verify-production"),
+                    &format!("incident:{incident_id}:verify-durable-production"),
                     Some(incident_id),
                     &json!({
                         "incidentId": incident_id,
                         "attemptId": attempt_id,
-                        "phase": "production",
+                        "phase": "durable-production",
                         "productionDeploymentId": deployment.id,
                         "productionCommitSha": deployment.commit_sha
                     }),
@@ -280,6 +408,7 @@ async fn verify_durable_production(database: &Database, payload: &Value) -> anyh
         return Ok(());
     }
     let vercel = legacy::vercel_client_public(database, &work).await?;
+
     if let Err(error) =
         production::verify_current_production(&vercel, deployment_id, commit_sha).await
     {
@@ -292,15 +421,17 @@ async fn verify_durable_production(database: &Database, payload: &Value) -> anyh
             .await?;
         return Ok(());
     }
+
     database
         .enqueue_after(
             JobType::PostDeployWatch,
-            &format!("incident:{incident_id}:watch:0"),
+            &format!("incident:{incident_id}:durable-watch:0"),
             Some(incident_id),
             &json!({
                 "incidentId": incident_id,
                 "attemptId": attempt_id,
                 "check": 0,
+                "phase": "durable-production",
                 "productionDeploymentId": deployment_id,
                 "productionCommitSha": commit_sha
             }),
@@ -314,10 +445,7 @@ async fn verify_durable_production(database: &Database, payload: &Value) -> anyh
 async fn watch_durable_production(database: &Database, payload: &Value) -> anyhow::Result<()> {
     let incident_id = required_string(payload, "incidentId")?.parse()?;
     let attempt_id = required_string(payload, "attemptId")?.parse()?;
-    let check = payload
-        .get("check")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| anyhow::anyhow!("watch check is missing"))?;
+    let check = required_check(payload)?;
     let deployment_id = required_string(payload, "productionDeploymentId")?;
     let commit_sha = required_string(payload, "productionCommitSha")?;
     let work = database.incident_work(incident_id).await?;
@@ -325,6 +453,7 @@ async fn watch_durable_production(database: &Database, payload: &Value) -> anyho
         return Ok(());
     }
     let vercel = legacy::vercel_client_public(database, &work).await?;
+
     if let Err(error) =
         production::verify_current_production(&vercel, deployment_id, commit_sha).await
     {
@@ -337,17 +466,19 @@ async fn watch_durable_production(database: &Database, payload: &Value) -> anyho
             .await?;
         return Ok(());
     }
+
     if check < 2 {
         let next = check + 1;
         database
             .enqueue_after(
                 JobType::PostDeployWatch,
-                &format!("incident:{incident_id}:watch:{next}"),
+                &format!("incident:{incident_id}:durable-watch:{next}"),
                 Some(incident_id),
                 &json!({
                     "incidentId": incident_id,
                     "attemptId": attempt_id,
                     "check": next,
+                    "phase": "durable-production",
                     "productionDeploymentId": deployment_id,
                     "productionCommitSha": commit_sha
                 }),
@@ -368,7 +499,7 @@ async fn watch_durable_production(database: &Database, payload: &Value) -> anyho
             expected: IncidentState::VerifyingProduction,
             next: IncidentState::Resolved,
             actor: "worker".into(),
-            message: "Merged repair remained current and healthy throughout the production watch"
+            message: "Production repair stayed healthy and was durably merged into the source branch"
                 .into(),
             metadata: json!({
                 "checks": 3,
@@ -379,6 +510,13 @@ async fn watch_durable_production(database: &Database, payload: &Value) -> anyho
         .await?;
     legacy::enqueue_cleanup_public(database, incident_id, attempt_id).await?;
     Ok(())
+}
+
+fn required_check(value: &Value) -> anyhow::Result<u64> {
+    value
+        .get("check")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow::anyhow!("watch check is missing"))
 }
 
 fn required_string<'a>(value: &'a Value, key: &str) -> anyhow::Result<&'a str> {
