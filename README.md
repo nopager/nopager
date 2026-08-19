@@ -26,7 +26,7 @@ cd nopager
 sh scripts/quickstart.sh
 ```
 
-The bootstrap script creates `.env` when needed, generates a random PostgreSQL password plus random 32-byte `NOPAGER_MASTER_KEY` and `NOPAGER_ADMIN_TOKEN` secrets, detects the Docker socket group on Linux, builds the images, starts PostgreSQL/API/Worker/Web, and waits for the API plus web console to become ready. Existing Alpha installs keep their existing non-empty secrets, and the bootstrap recognizes the earlier fixed PostgreSQL credential so an existing volume is not silently made unbootable during upgrade.
+The bootstrap script creates `.env` when needed, generates a random PostgreSQL password plus random 32-byte `NOPAGER_MASTER_KEY` and `NOPAGER_ADMIN_TOKEN` secrets, detects the Docker socket group on Linux, starts PostgreSQL/API/Worker/Web, and waits for the API plus web console to become ready. On a clean Git checkout it first tries to pull prebuilt amd64/arm64 application images for that exact Git commit from GitHub Container Registry; if those images are unavailable or the local source tree has been modified, it falls back to building locally. Existing Alpha installs keep their existing non-empty secrets, and the bootstrap recognizes the earlier fixed PostgreSQL credential so an existing volume is not silently made unbootable during upgrade.
 
 Then open:
 
