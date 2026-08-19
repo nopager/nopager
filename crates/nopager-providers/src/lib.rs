@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
 
+#[allow(dead_code)]
 #[path = "core.rs"]
 mod core;
 mod setup_validation;
