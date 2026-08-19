@@ -58,15 +58,32 @@ pub struct ProjectDetails {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectLink {
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub org: Option<String>,
+    #[serde(default)]
+    pub repo: Option<String>,
+    #[serde(default)]
+    pub repo_id: Option<u64>,
     #[serde(default)]
     pub production_branch: Option<String>,
 }
 
 impl ProjectDetails {
+    pub fn github_link(&self) -> Option<&ProjectLink> {
+        let link = self.link.as_ref()?;
+        match link.kind.as_deref() {
+            Some("github" | "github-limited") => Some(link),
+            _ => None,
+        }
+    }
+
     pub fn git_production_branch(&self) -> Option<&str> {
-        self.link
-            .as_ref()
-            .map(|link| link.production_branch.as_deref().unwrap_or("main"))
+        self.github_link()?
+            .production_branch
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
     }
 }
 
@@ -485,29 +502,48 @@ mod tests {
     }
 
     #[test]
-    fn project_git_production_branch_uses_explicit_value_or_main_default() {
-        let explicit: ProjectDetails = serde_json::from_value(json!({
-            "id": "prj_1",
-            "name": "demo",
-            "link": { "productionBranch": "release" }
-        }))
-        .unwrap();
-        assert_eq!(explicit.git_production_branch(), Some("release"));
+    fn project_git_link_requires_github_and_explicit_production_branch() {
+        for kind in ["github", "github-limited"] {
+            let project: ProjectDetails = serde_json::from_value(json!({
+                "id": "prj_1",
+                "name": "demo",
+                "link": {
+                    "type": kind,
+                    "org": "example",
+                    "repo": "app",
+                    "repoId": 42,
+                    "productionBranch": "release"
+                }
+            }))
+            .unwrap();
+            assert!(project.github_link().is_some());
+            assert_eq!(project.git_production_branch(), Some("release"));
+        }
 
-        let default_main: ProjectDetails = serde_json::from_value(json!({
+        let gitlab: ProjectDetails = serde_json::from_value(json!({
             "id": "prj_1",
             "name": "demo",
-            "link": {}
+            "link": { "type": "gitlab", "productionBranch": "main" }
         }))
         .unwrap();
-        assert_eq!(default_main.git_production_branch(), Some("main"));
+        assert!(gitlab.github_link().is_none());
+        assert_eq!(gitlab.git_production_branch(), None);
+
+        let missing_branch: ProjectDetails = serde_json::from_value(json!({
+            "id": "prj_1",
+            "name": "demo",
+            "link": { "type": "github", "org": "example", "repo": "app" }
+        }))
+        .unwrap();
+        assert!(missing_branch.github_link().is_some());
+        assert_eq!(missing_branch.git_production_branch(), None);
 
         let no_git_link: ProjectDetails = serde_json::from_value(json!({
             "id": "prj_1",
             "name": "demo"
         }))
         .unwrap();
-        assert_eq!(no_git_link.git_production_branch(), None);
+        assert!(no_git_link.github_link().is_none());
     }
 
     #[test]
