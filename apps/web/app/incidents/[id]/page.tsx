@@ -80,21 +80,20 @@ export default async function IncidentDetailPage({
           <div>
             <strong>{sourceRecoveryCopy.title}</strong>
             <p>{sourceRecoveryCopy.message}</p>
-            {sourceRecovery.pullRequestUrl &&
-              sourceRecoveryCopy.linkLabel && (
-                <a
-                  className="text-link"
-                  href={sourceRecovery.pullRequestUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  {sourceRecoveryCopy.linkLabel}
-                  {sourceRecovery.pullRequestNumber
-                    ? ` #${sourceRecovery.pullRequestNumber}`
-                    : ""}{" "}
-                  →
-                </a>
-              )}
+            {sourceRecovery.pullRequestUrl && sourceRecoveryCopy.linkLabel && (
+              <a
+                className="text-link"
+                href={sourceRecovery.pullRequestUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
+                {sourceRecoveryCopy.linkLabel}
+                {sourceRecovery.pullRequestNumber
+                  ? ` #${sourceRecovery.pullRequestNumber}`
+                  : ""}{" "}
+                →
+              </a>
+            )}
           </div>
         </div>
       )}
