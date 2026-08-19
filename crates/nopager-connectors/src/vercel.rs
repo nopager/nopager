@@ -211,15 +211,15 @@ impl VercelClient {
                 .await?,
         )
         .await?;
-        if deployment.target.as_deref() != Some("production") {
+        let Some(project_id) = deployment.project_id.as_deref() else {
+            if deployment.target.as_deref() == Some("production") {
+                return Err(ConnectorError::InvalidConfiguration(
+                    "Vercel production deployment omitted projectId; current Production identity cannot be proven"
+                        .into(),
+                ));
+            }
             return Ok(deployment);
-        }
-        let project_id = deployment.project_id.as_deref().ok_or_else(|| {
-            ConnectorError::InvalidConfiguration(
-                "Vercel production deployment omitted projectId; current Production identity cannot be proven"
-                    .into(),
-            )
-        })?;
+        };
         let project = self.get_project(project_id).await?;
         Ok(normalize_current_target(
             deployment,
@@ -236,13 +236,7 @@ impl VercelClient {
     ) -> Result<Vec<Deployment>, ConnectorError> {
         let deployments = self.list_deployments_since(project_id, limit, None).await?;
         let project = self.get_project(project_id).await?;
-        let current_production_id = project
-            .current_production_target()
-            .map(|target| target.id.as_str());
-        Ok(deployments
-            .into_iter()
-            .map(|deployment| normalize_current_target(deployment, current_production_id))
-            .collect())
+        Ok(normalize_deployment_list(deployments, &project))
     }
 
     pub async fn list_deployments_since(
@@ -493,13 +487,48 @@ fn preview_secrets_explicitly_allowed() -> bool {
         })
 }
 
+fn normalize_deployment_list(
+    deployments: Vec<Deployment>,
+    project: &ProjectDetails,
+) -> Vec<Deployment> {
+    let current = project.current_production_target();
+    let current_production_id = current.map(|target| target.id.as_str());
+    let mut deployments = deployments
+        .into_iter()
+        .map(|deployment| normalize_current_target(deployment, current_production_id))
+        .collect::<Vec<_>>();
+
+    if let Some(target) = current
+        && !deployments
+            .iter()
+            .any(|deployment| deployment.id == target.id)
+    {
+        deployments.insert(
+            0,
+            Deployment {
+                id: target.id.clone(),
+                url: target.url.clone(),
+                ready_state: target.ready_state.clone(),
+                state: None,
+                created: None,
+                target: Some("production".into()),
+                live: None,
+                project_id: Some(project.id.clone()),
+                meta: target.meta.clone(),
+            },
+        );
+    }
+
+    deployments
+}
+
 fn normalize_current_target(
     mut deployment: Deployment,
     current_production_id: Option<&str>,
 ) -> Deployment {
-    if deployment.target.as_deref() == Some("production")
-        && current_production_id != Some(deployment.id.as_str())
-    {
+    if current_production_id == Some(deployment.id.as_str()) {
+        deployment.target = Some("production".into());
+    } else if deployment.target.as_deref() == Some("production") {
         deployment.target = None;
     }
     deployment
@@ -655,12 +684,16 @@ mod tests {
     }
 
     #[test]
-    fn current_production_identity_fails_closed() {
+    fn current_production_identity_fails_closed_and_can_fill_missing_target() {
         let current = normalize_current_target(
             deployment("dpl_current", Some("production")),
             Some("dpl_current"),
         );
         assert_eq!(current.target.as_deref(), Some("production"));
+
+        let missing_target =
+            normalize_current_target(deployment("dpl_current", None), Some("dpl_current"));
+        assert_eq!(missing_target.target.as_deref(), Some("production"));
 
         for current_id in [None, Some("dpl_other")] {
             let stale =
@@ -670,6 +703,24 @@ mod tests {
 
         let preview = normalize_current_target(deployment("dpl_preview", Some("preview")), None);
         assert_eq!(preview.target.as_deref(), Some("preview"));
+    }
+
+    #[test]
+    fn deployment_list_injects_current_production_outside_bounded_history() {
+        let project = project_with_production_target("READY", Some("PROMOTED"));
+        let deployments =
+            normalize_deployment_list(vec![deployment("dpl_preview", Some("preview"))], &project);
+        assert_eq!(deployments[0].id, "dpl_current");
+        assert_eq!(deployments[0].target.as_deref(), Some("production"));
+        assert_eq!(deployments[0].project_id.as_deref(), Some("prj_123"));
+        assert_eq!(
+            deployments[0]
+                .meta
+                .get("githubCommitSha")
+                .and_then(Value::as_str),
+            Some("abc123")
+        );
+        assert_eq!(deployments[1].id, "dpl_preview");
     }
 
     #[test]
