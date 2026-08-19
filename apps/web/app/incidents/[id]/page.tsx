@@ -211,7 +211,9 @@ type SourceRecoveryCopy = {
   linkLabel: string | null;
 };
 
-function sourceRecoveryNotice(action: SourceRecoveryAction): SourceRecoveryCopy {
+function sourceRecoveryNotice(
+  action: SourceRecoveryAction,
+): SourceRecoveryCopy {
   switch (action.kind) {
     case "review_source_revert":
       return {
