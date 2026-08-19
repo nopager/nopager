@@ -16,10 +16,7 @@ mod production;
 mod legacy {
     include!("legacy_pipeline.rs");
 
-    pub(super) async fn execute_job_public(
-        database: &Database,
-        job: &Job,
-    ) -> anyhow::Result<()> {
+    pub(super) async fn execute_job_public(database: &Database, job: &Job) -> anyhow::Result<()> {
         execute_job(database, job).await
     }
 
@@ -167,14 +164,8 @@ async fn process_durable_production_action(
     let github = legacy::github_client_public(database, &work).await?;
     let vercel = legacy::vercel_client_public(database, &work).await?;
 
-    match production::land_and_find_production(
-        &github,
-        &vercel,
-        &work,
-        &attempt,
-        vercel_project_id,
-    )
-    .await?
+    match production::land_and_find_production(&github, &vercel, &work, &attempt, vercel_project_id)
+        .await?
     {
         production::ProductionLanding::Pending { merge_sha } => {
             if poll == 0 {
@@ -289,26 +280,16 @@ async fn verify_durable_production(database: &Database, payload: &Value) -> anyh
         return Ok(());
     }
     let vercel = legacy::vercel_client_public(database, &work).await?;
-    if let Err(error) = production::verify_current_production(&vercel, deployment_id, commit_sha).await {
-        legacy::begin_rollback_public(
-            database,
-            &work,
-            incident_id,
-            attempt_id,
-            &error.to_string(),
-        )
-        .await?;
+    if let Err(error) =
+        production::verify_current_production(&vercel, deployment_id, commit_sha).await
+    {
+        legacy::begin_rollback_public(database, &work, incident_id, attempt_id, &error.to_string())
+            .await?;
         return Ok(());
     }
     if let Err(error) = legacy::require_healthy_public(&work.health_check_url).await {
-        legacy::begin_rollback_public(
-            database,
-            &work,
-            incident_id,
-            attempt_id,
-            &error.to_string(),
-        )
-        .await?;
+        legacy::begin_rollback_public(database, &work, incident_id, attempt_id, &error.to_string())
+            .await?;
         return Ok(());
     }
     database
@@ -344,26 +325,16 @@ async fn watch_durable_production(database: &Database, payload: &Value) -> anyho
         return Ok(());
     }
     let vercel = legacy::vercel_client_public(database, &work).await?;
-    if let Err(error) = production::verify_current_production(&vercel, deployment_id, commit_sha).await {
-        legacy::begin_rollback_public(
-            database,
-            &work,
-            incident_id,
-            attempt_id,
-            &error.to_string(),
-        )
-        .await?;
+    if let Err(error) =
+        production::verify_current_production(&vercel, deployment_id, commit_sha).await
+    {
+        legacy::begin_rollback_public(database, &work, incident_id, attempt_id, &error.to_string())
+            .await?;
         return Ok(());
     }
     if let Err(error) = legacy::require_healthy_public(&work.health_check_url).await {
-        legacy::begin_rollback_public(
-            database,
-            &work,
-            incident_id,
-            attempt_id,
-            &error.to_string(),
-        )
-        .await?;
+        legacy::begin_rollback_public(database, &work, incident_id, attempt_id, &error.to_string())
+            .await?;
         return Ok(());
     }
     if check < 2 {
