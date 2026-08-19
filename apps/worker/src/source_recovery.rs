@@ -200,7 +200,9 @@ pub(crate) async fn verify_source_revert_review(
 
     let auth = crate::legacy::github_auth_public(database, &work).await?;
     let status =
-        match get_pull_request_status(&auth, &work.repo_owner, &work.repo_name, expected.number).await {
+        match get_pull_request_status(&auth, &work.repo_owner, &work.repo_name, expected.number)
+            .await
+        {
             Ok(status) => status,
             Err(error) => {
                 audit_source_recovery_failure(
