@@ -487,10 +487,7 @@ fn preview_secrets_explicitly_allowed() -> bool {
         })
 }
 
-fn normalize_deployment_list(
-    deployments: Vec<Deployment>,
-    project: &ProjectDetails,
-) -> Vec<Deployment> {
+fn normalize_deployment_list(deployments: Vec<Deployment>, project: &ProjectDetails) -> Vec<Deployment> {
     let current = project.current_production_target();
     let current_production_id = current.map(|target| target.id.as_str());
     let mut deployments = deployments
@@ -499,7 +496,9 @@ fn normalize_deployment_list(
         .collect::<Vec<_>>();
 
     if let Some(target) = current
-        && !deployments.iter().any(|deployment| deployment.id == target.id)
+        && !deployments
+            .iter()
+            .any(|deployment| deployment.id == target.id)
     {
         deployments.insert(
             0,
@@ -689,10 +688,8 @@ mod tests {
         );
         assert_eq!(current.target.as_deref(), Some("production"));
 
-        let missing_target = normalize_current_target(
-            deployment("dpl_current", None),
-            Some("dpl_current"),
-        );
+        let missing_target =
+            normalize_current_target(deployment("dpl_current", None), Some("dpl_current"));
         assert_eq!(missing_target.target.as_deref(), Some("production"));
 
         for current_id in [None, Some("dpl_other")] {
