@@ -50,6 +50,33 @@ const initial: SetupData = {
 
 const labels = ["Admin", "GitHub", "Vercel", "AI", "Production", "Safety"];
 
+const setupErrors: Record<string, string> = {
+  github_connection_failed:
+    "GitHub could not authenticate this App. Check the App ID, Installation ID, and private-key PEM, then try again.",
+  github_repository_not_accessible:
+    "GitHub authentication worked, but this App cannot access the selected repository. Install the App on that repository and verify Contents and Pull requests permissions.",
+  vercel_connection_failed:
+    "Vercel could not authenticate this token. Check the token and Team ID, if your project belongs to a team.",
+  vercel_project_not_accessible:
+    "Vercel authentication worked, but the selected project is not accessible. Check the project name/ID and account or Team ID.",
+  vercel_production_deployment_not_found:
+    "No READY production deployment was found for this Vercel project. Deploy the app to production once, then retry.",
+  provider_connection_failed:
+    "The model provider rejected this connection. Check the API key and exact model ID supported by your provider account.",
+  production_health_failed:
+    "The health URL did not return a successful HTTP 200 response. It must be publicly reachable from the NoPager host without browser login.",
+  unsafe_health_check_url:
+    "Use a public HTTPS health URL. Localhost, private-network, credential-bearing, and unsafe addresses are blocked.",
+  unsafe_production_url:
+    "Use a public HTTPS production URL. Localhost, private-network, credential-bearing, and unsafe addresses are blocked.",
+  invalid_setup:
+    "One or more required setup values are missing or invalid. Return to the earlier step and verify each connection.",
+  app_already_protected:
+    "This NoPager Alpha installation already protects an app. The current open-source Alpha supports one protected app per installation.",
+  unauthorized:
+    "Your local admin session expired. Sign in again and continue setup.",
+};
+
 export default function SetupPage() {
   const [step, setStep] = useState(0);
   const [data, setData] = useState(initial);
@@ -81,6 +108,46 @@ export default function SetupPage() {
     setData((current) => ({ ...current, [key]: value }));
   }
 
+  function updateRepositoryName(value: string) {
+    setData((current) => ({
+      ...current,
+      repoName: value,
+      name:
+        current.name.trim() === "" || current.name === current.repoName
+          ? value
+          : current.name,
+    }));
+  }
+
+  function updateRepositoryOwner(value: string) {
+    const pasted = repositoryParts(value);
+    if (!pasted) {
+      update("repoOwner", value);
+      return;
+    }
+    setData((current) => ({
+      ...current,
+      repoOwner: pasted.owner,
+      repoName: pasted.name,
+      name:
+        current.name.trim() === "" || current.name === current.repoName
+          ? pasted.name
+          : current.name,
+    }));
+  }
+
+  function updateProductionUrl(value: string) {
+    setData((current) => ({
+      ...current,
+      productionUrl: value,
+      healthCheckUrl:
+        current.healthCheckUrl.trim() === "" ||
+        current.healthCheckUrl === current.productionUrl
+          ? value
+          : current.healthCheckUrl,
+    }));
+  }
+
   async function submit(event: FormEvent) {
     event.preventDefault();
     setBusy(true);
@@ -100,8 +167,16 @@ export default function SetupPage() {
         );
         await expectOk(response);
         setAdminExists(true);
-        if (appProtected) setComplete(true);
-        else setStep(1);
+        if (appProtected) {
+          setComplete(true);
+        } else {
+          setData((current) => ({
+            ...current,
+            githubWebhookSecret:
+              current.githubWebhookSecret || generateWebhookSecret(),
+          }));
+          setStep(1);
+        }
       } else if (step < labels.length - 1) {
         const tests: Record<number, [string, object]> = {
           1: [
@@ -206,7 +281,14 @@ export default function SetupPage() {
       <h1>{title(step, adminExists)}</h1>
       <p>{description(step)}</p>
       <form className="form-grid setup-form" onSubmit={submit}>
-        {fields(step, data, update)}
+        {fields(
+          step,
+          data,
+          update,
+          updateRepositoryOwner,
+          updateRepositoryName,
+          updateProductionUrl,
+        )}
         {error && (
           <p className="form-error full" role="alert">
             {error}
@@ -217,19 +299,16 @@ export default function SetupPage() {
             <button
               type="button"
               className="secondary-button"
-              onClick={() => setStep(step - 1)}
+              onClick={() => {
+                setError("");
+                setStep(step - 1);
+              }}
             >
               Back
             </button>
           )}
           <button className="primary-button" disabled={busy}>
-            {busy
-              ? "Checking…"
-              : step === labels.length - 1
-                ? "Protect App"
-                : step === 0
-                  ? "Save & continue"
-                  : "Test & continue"}
+            {busy ? "Checking…" : primaryAction(step, adminExists)}
           </button>
         </div>
       </form>
@@ -244,9 +323,13 @@ function SetupShell({ step, children }: { step: number; children: ReactNode }) {
         <span className="brand-mark">N</span> NoPager
       </div>
       <div className="setup-card">
-        <div className="setup-progress">
+        <div className="setup-progress" aria-label="Setup progress">
           {labels.map((label, index) => (
-            <span key={label} className={index < step ? "complete" : ""} />
+            <span
+              key={label}
+              className={index < step ? "complete" : ""}
+              title={label}
+            />
           ))}
         </div>
         {children}
@@ -264,6 +347,24 @@ function Summary({ label, value }: { label: string; value: string }) {
   );
 }
 
+function SetupNote({
+  title,
+  children,
+}: {
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="notice blue full">
+      <span aria-hidden="true">i</span>
+      <div>
+        <strong>{title}</strong>
+        <p>{children}</p>
+      </div>
+    </div>
+  );
+}
+
 function title(step: number, adminExists: boolean) {
   return [
     adminExists ? "Sign in" : "Create local admin",
@@ -277,12 +378,23 @@ function title(step: number, adminExists: boolean) {
 
 function description(step: number) {
   return [
-    "Your local account controls production approvals.",
-    "Add the GitHub App and repository NoPager may repair. Repository ID and default branch are discovered automatically.",
-    "Select the Vercel project used for previews and production. Team ID and webhook secret are optional; polling remains active without a Vercel webhook.",
-    "Your API key is encrypted locally and never shown again. The full repository stays in the self-hosted worker; NoPager sends only bounded incident evidence to your BYOK model provider after local secret redaction. Relevant code diffs may still leave this host. Enter the exact model ID supported by your provider.",
-    "NoPager will require a passing public HTTPS health check.",
-    "Safe Mode requires approval before production changes.",
+    "This account exists only on your NoPager installation and controls production approvals.",
+    "Give NoPager access only to the repository it may inspect and repair. Repository ID and default branch are discovered automatically.",
+    "Connect the Vercel project NoPager will use for Preview verification, promotion, and rollback.",
+    "Bring your own model API key. NoPager does not proxy or pay for model usage; your provider bills your account directly.",
+    "NoPager needs a public HTTPS health URL that returns HTTP 200 when the app is healthy.",
+    "Safe Mode is the recommended starting point and always requires approval before production promotion.",
+  ][step];
+}
+
+function primaryAction(step: number, adminExists: boolean) {
+  return [
+    adminExists ? "Sign in & continue" : "Create admin & continue",
+    "Verify GitHub",
+    "Verify Vercel",
+    "Verify AI provider",
+    "Verify production health",
+    "Protect App",
   ][step];
 }
 
@@ -294,6 +406,7 @@ function Input({
   full = false,
   required = true,
   minLength,
+  placeholder,
 }: {
   label: string;
   value: string;
@@ -302,6 +415,7 @@ function Input({
   full?: boolean;
   required?: boolean;
   minLength?: number;
+  placeholder?: string;
 }) {
   return (
     <label className={full ? "full" : ""}>
@@ -311,6 +425,7 @@ function Input({
         minLength={minLength}
         type={type}
         value={value}
+        placeholder={placeholder}
         onChange={(event) => onChange(event.target.value)}
         autoComplete="off"
       />
@@ -343,18 +458,60 @@ function TextArea({
   );
 }
 
+function GeneratedSecret({
+  value,
+  onRegenerate,
+}: {
+  value: string;
+  onRegenerate: () => void;
+}) {
+  const [copied, setCopied] = useState(false);
+
+  async function copy() {
+    await navigator.clipboard.writeText(value);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1500);
+  }
+
+  return (
+    <label className="full">
+      GitHub webhook secret
+      <input readOnly value={value} autoComplete="off" spellCheck={false} />
+      <small>
+        Generated locally in your browser. Copy this exact value into the GitHub
+        App webhook secret field.{" "}
+        <button type="button" className="text-link" onClick={copy}>
+          {copied ? "Copied" : "Copy secret"}
+        </button>{" "}
+        ·{" "}
+        <button type="button" className="text-link" onClick={onRegenerate}>
+          Regenerate
+        </button>
+      </small>
+    </label>
+  );
+}
+
 function fields(
   step: number,
   data: SetupData,
   update: <K extends keyof SetupData>(key: K, value: SetupData[K]) => void,
+  updateRepositoryOwner: (value: string) => void,
+  updateRepositoryName: (value: string) => void,
+  updateProductionUrl: (value: string) => void,
 ) {
-  if (step === 0)
+  if (step === 0) {
     return (
       <>
+        <SetupNote title="Local by default">
+          Your password and session stay on this self-hosted NoPager instance.
+          There is no NoPager cloud account to create.
+        </SetupNote>
         <Input
           label="Username"
           value={data.username}
           onChange={(v) => update("username", v)}
+          placeholder="admin"
         />
         <Input
           label="Password (12+ characters)"
@@ -365,42 +522,61 @@ function fields(
         />
       </>
     );
-  if (step === 1)
+  }
+
+  if (step === 1) {
     return (
       <>
+        <SetupNote title="One GitHub App, one repository">
+          Create a GitHub App with Contents and Pull requests read/write plus
+          Actions read-only, install it only on the repository you want NoPager
+          to protect, then paste the App values below.{" "}
+          <a
+            className="text-link"
+            href="https://github.com/nopager/nopager/blob/main/docs/GITHUB_APP_SETUP.md"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Open the exact setup guide ↗
+          </a>
+        </SetupNote>
         <Input
           label="App name"
           value={data.name}
           onChange={(v) => update("name", v)}
+          placeholder="my-app"
         />
         <Input
           label="Repository owner"
           value={data.repoOwner}
-          onChange={(v) => update("repoOwner", v)}
+          onChange={updateRepositoryOwner}
+          placeholder="owner (or paste owner/repository)"
         />
         <Input
           label="Repository name"
           value={data.repoName}
-          onChange={(v) => update("repoName", v)}
+          onChange={updateRepositoryName}
+          placeholder="repository"
         />
         <Input
           label="GitHub App ID"
           type="number"
           value={data.githubAppId}
           onChange={(v) => update("githubAppId", v)}
+          placeholder="123456"
         />
         <Input
           label="Installation ID"
           type="number"
           value={data.githubInstallationId}
           onChange={(v) => update("githubInstallationId", v)}
+          placeholder="12345678"
         />
-        <Input
-          label="Webhook secret"
-          type="password"
-          minLength={16}
+        <GeneratedSecret
           value={data.githubWebhookSecret}
-          onChange={(v) => update("githubWebhookSecret", v)}
+          onRegenerate={() =>
+            update("githubWebhookSecret", generateWebhookSecret())
+          }
         />
         <TextArea
           label="GitHub App private key (PEM)"
@@ -409,19 +585,21 @@ function fields(
         />
       </>
     );
-  if (step === 2)
+  }
+
+  if (step === 2) {
     return (
       <>
-        <Input
-          label="Team ID (optional for personal account)"
-          value={data.vercelTeamId}
-          onChange={(v) => update("vercelTeamId", v)}
-          required={false}
-        />
+        <SetupNote title="Your Vercel account stays yours">
+          Use a Vercel access token that can read this project and manage its
+          deployments. Team ID is only needed for team-owned projects. The
+          Vercel webhook is optional because NoPager also polls deployments.
+        </SetupNote>
         <Input
           label="Project ID or project name"
           value={data.vercelProjectId}
           onChange={(v) => update("vercelProjectId", v)}
+          placeholder="my-app"
         />
         <Input
           label="Access token"
@@ -430,17 +608,33 @@ function fields(
           onChange={(v) => update("vercelToken", v)}
         />
         <Input
+          label="Team ID (optional)"
+          value={data.vercelTeamId}
+          onChange={(v) => update("vercelTeamId", v)}
+          required={false}
+          placeholder="Leave blank for a personal account"
+        />
+        <Input
           label="Webhook secret (optional)"
           type="password"
           value={data.vercelWebhookSecret}
           onChange={(v) => update("vercelWebhookSecret", v)}
           required={false}
+          placeholder="Polling works without this"
         />
       </>
     );
-  if (step === 3)
+  }
+
+  if (step === 3) {
     return (
       <>
+        <SetupNote title="BYOK: NoPager never resells your tokens">
+          Your API key is encrypted locally before database persistence. Model
+          usage is billed directly by your selected provider. Only bounded,
+          locally redacted incident evidence is sent to that provider; the full
+          repository is not uploaded as a prompt.
+        </SetupNote>
         <label>
           Provider
           <select
@@ -459,6 +653,7 @@ function fields(
           label="Model ID"
           value={data.providerModel}
           onChange={(v) => update("providerModel", v)}
+          placeholder="Exact model ID from your provider"
         />
         <Input
           full
@@ -469,15 +664,24 @@ function fields(
         />
       </>
     );
-  if (step === 4)
+  }
+
+  if (step === 4) {
     return (
       <>
+        <SetupNote title="Start with the simplest health check">
+          Enter your normal production URL first; NoPager pre-fills the same URL
+          as the health check. If your app has a dedicated endpoint such as
+          /health or /api/health, replace only the health URL. It must be public
+          HTTPS and return HTTP 200 without interactive login.
+        </SetupNote>
         <Input
           full
           label="Production URL"
           type="url"
           value={data.productionUrl}
-          onChange={(v) => update("productionUrl", v)}
+          onChange={updateProductionUrl}
+          placeholder="https://example.com"
         />
         <Input
           full
@@ -485,35 +689,68 @@ function fields(
           type="url"
           value={data.healthCheckUrl}
           onChange={(v) => update("healthCheckUrl", v)}
+          placeholder="https://example.com/health"
         />
       </>
     );
+  }
+
   return (
-    <label className="full">
-      Safety mode
-      <select
-        value={data.safetyMode}
-        onChange={(event) =>
-          update("safetyMode", event.target.value as SetupData["safetyMode"])
-        }
-      >
-        <option value="safe">Safe Mode (recommended)</option>
-        <option value="autopilot">Autopilot (Experimental)</option>
-      </select>
-      <small>
-        High-risk actions are always blocked. Safe Mode waits for your approval
-        before production.
-      </small>
-    </label>
+    <>
+      <SetupNote title="Safe Mode is the right first run">
+        NoPager can diagnose, repair, test, create a PR, deploy a Preview, and
+        verify it automatically. In Safe Mode, production still waits for your
+        explicit approval. High-risk actions remain blocked regardless of mode.
+      </SetupNote>
+      <label className="full">
+        Safety mode
+        <select
+          value={data.safetyMode}
+          onChange={(event) =>
+            update("safetyMode", event.target.value as SetupData["safetyMode"])
+          }
+        >
+          <option value="safe">Safe Mode (recommended)</option>
+          <option value="autopilot">Autopilot (Experimental)</option>
+        </select>
+        <small>
+          Start with Safe Mode for the first real incident. Autopilot is limited
+          to low-risk, verified, reversible production actions.
+        </small>
+      </label>
+    </>
   );
 }
 
 async function expectOk(response: Response) {
   if (response.ok) return;
   const body = (await response.json().catch(() => ({}))) as { error?: string };
+  const code = body.error;
   throw new Error(
-    body.error?.replaceAll("_", " ") ?? `Request failed (${response.status})`,
+    (code && setupErrors[code]) ||
+      code?.replaceAll("_", " ") ||
+      `Request failed (${response.status})`,
   );
+}
+
+function generateWebhookSecret() {
+  const bytes = new Uint8Array(32);
+  window.crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
+    "",
+  );
+}
+
+function repositoryParts(value: string) {
+  const trimmed = value
+    .trim()
+    .replace(/^https?:\/\/github\.com\//, "")
+    .replace(/\.git$/, "")
+    .replace(/^\/+|\/+$/g, "");
+  const parts = trimmed.split("/");
+  if (parts.length !== 2 || parts.some((part) => part.trim() === ""))
+    return null;
+  return { owner: parts[0], name: parts[1] };
 }
 
 function message(reason: unknown) {
