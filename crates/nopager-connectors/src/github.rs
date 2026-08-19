@@ -129,6 +129,12 @@ pub struct RepositoryDetails {
     pub id: u64,
     pub full_name: String,
     pub default_branch: String,
+    #[serde(default)]
+    pub allow_merge_commit: bool,
+    #[serde(default)]
+    pub allow_squash_merge: bool,
+    #[serde(default)]
+    pub allow_rebase_merge: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -516,6 +522,8 @@ impl GitHubClient {
             self.mark_pull_request_ready(&pull_request.node_id).await?;
         }
 
+        let repository_details = self.get_repository(owner, repository).await?;
+        let merge_method = preferred_merge_method(&repository_details)?;
         let response: MergePullRequestResponse = decode(
             self.request(
                 reqwest::Method::PUT,
@@ -523,9 +531,9 @@ impl GitHubClient {
             )?
             .json(&serde_json::json!({
                 "sha": expected_head_sha,
-                "merge_method": "merge",
+                "merge_method": merge_method,
                 "commit_title": format!("Merge verified NoPager repair #{}", pull_request.number),
-                "commit_message": "NoPager sandbox and Vercel Preview verification passed before this production-boundary merge."
+                "commit_message": "NoPager sandbox, Preview, and production verification passed before this durable source merge."
             }))
             .send()
             .await?,
@@ -650,6 +658,21 @@ impl GitHubClient {
         tokio::task::spawn_blocking(move || extract_archive(&bytes, &destination))
             .await
             .map_err(|error| ConnectorError::Archive(error.to_string()))?
+    }
+}
+
+fn preferred_merge_method(repository: &RepositoryDetails) -> Result<&'static str, ConnectorError> {
+    if repository.allow_merge_commit {
+        Ok("merge")
+    } else if repository.allow_squash_merge {
+        Ok("squash")
+    } else if repository.allow_rebase_merge {
+        Ok("rebase")
+    } else {
+        Err(ConnectorError::InvalidConfiguration(
+            "GitHub repository does not allow merge, squash, or rebase merging for repair pull requests"
+                .into(),
+        ))
     }
 }
 
@@ -876,6 +899,17 @@ mod tests {
         }
     }
 
+    fn repository_with_merge_methods(merge: bool, squash: bool, rebase: bool) -> RepositoryDetails {
+        RepositoryDetails {
+            id: 1,
+            full_name: "example/app".into(),
+            default_branch: "main".into(),
+            allow_merge_commit: merge,
+            allow_squash_merge: squash,
+            allow_rebase_merge: rebase,
+        }
+    }
+
     #[test]
     fn stable_safe_branch_name() {
         assert_eq!(
@@ -898,6 +932,25 @@ mod tests {
         assert!(validate_repair_pull_request(&pull_request, "repair-sha", "base-sha").is_ok());
         assert!(validate_repair_pull_request(&pull_request, "other", "base-sha").is_err());
         assert!(validate_repair_pull_request(&pull_request, "repair-sha", "new-main").is_err());
+    }
+
+    #[test]
+    fn repair_merge_respects_repository_allowed_methods() {
+        assert_eq!(
+            preferred_merge_method(&repository_with_merge_methods(true, true, true)).unwrap(),
+            "merge"
+        );
+        assert_eq!(
+            preferred_merge_method(&repository_with_merge_methods(false, true, true)).unwrap(),
+            "squash"
+        );
+        assert_eq!(
+            preferred_merge_method(&repository_with_merge_methods(false, false, true)).unwrap(),
+            "rebase"
+        );
+        assert!(
+            preferred_merge_method(&repository_with_merge_methods(false, false, false)).is_err()
+        );
     }
 
     #[test]
