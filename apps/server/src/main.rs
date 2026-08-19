@@ -14,7 +14,13 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use nopager_config::ServerConfig;
-use nopager_connectors::{github::GitHubAppAuth, vercel::VercelClient};
+use nopager_connectors::{
+    github::GitHubAppAuth,
+    source_compatibility::{
+        GitHubSourceIdentity, SourceCompatibilityError, validate_vercel_github_source,
+    },
+    vercel::VercelClient,
+};
 use nopager_crypto::SecretCipher;
 use nopager_db::{Database, ProtectedAppSetup};
 use nopager_monitor::{check_http, validate_health_url};
@@ -545,6 +551,25 @@ fn provider_connection_error_code(error: &ProviderError) -> &'static str {
     }
 }
 
+fn source_compatibility_error_code(error: &SourceCompatibilityError) -> &'static str {
+    match error {
+        SourceCompatibilityError::UnsupportedGitLink => "vercel_github_link_required",
+        SourceCompatibilityError::MissingProductionBranch => "vercel_production_branch_missing",
+        SourceCompatibilityError::ProductionBranchMismatch { .. } => {
+            "vercel_production_branch_mismatch"
+        }
+        SourceCompatibilityError::MissingOwner
+        | SourceCompatibilityError::MissingRepositoryIdentity => {
+            "vercel_github_repository_unverifiable"
+        }
+        SourceCompatibilityError::OwnerMismatch { .. }
+        | SourceCompatibilityError::RepositoryMismatch { .. }
+        | SourceCompatibilityError::RepositoryIdMismatch { .. } => {
+            "vercel_github_repository_mismatch"
+        }
+    }
+}
+
 async fn protect_app(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -643,6 +668,22 @@ async fn protect_app(
             .into_response();
         }
     };
+    if let Err(error) = validate_vercel_github_source(
+        &vercel_project,
+        GitHubSourceIdentity {
+            owner: &request.repo_owner,
+            repo: &request.repo_name,
+            repo_id: Some(github_repository.id),
+            default_branch: &github_repository.default_branch,
+        },
+    ) {
+        tracing::warn!(%error, "Vercel project is incompatible with durable GitHub repair");
+        return api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            source_compatibility_error_code(&error),
+        )
+        .into_response();
+    }
     let deployments = match vercel.list_deployments(&vercel_project.id, 10).await {
         Ok(deployments) => deployments,
         Err(error) => {

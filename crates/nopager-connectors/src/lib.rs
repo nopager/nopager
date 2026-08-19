@@ -1,4 +1,5 @@
 pub mod github;
+pub mod source_compatibility;
 pub mod vercel;
 
 use reqwest::{Response, StatusCode};
