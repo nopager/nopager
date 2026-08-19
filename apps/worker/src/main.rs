@@ -148,14 +148,14 @@ async fn verify_promoted_production(database: &Database, payload: &Value) -> any
         return Ok(());
     }
     let attempt = database.repair_attempt(attempt_id).await?;
-    let deployment_id = attempt
-        .preview_deployment_id
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("promoted deployment id is missing"))?;
     let commit_sha = attempt
         .repair_commit_sha
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("repair commit SHA is missing"))?;
+    let vercel_project_id = work
+        .vercel_project_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("Vercel project id is missing"))?;
     let vercel = legacy::vercel_client_public(database, &work).await?;
 
     if poll > MAX_PROMOTION_ACTIVATION_POLLS {
@@ -164,14 +164,20 @@ async fn verify_promoted_production(database: &Database, payload: &Value) -> any
             &work,
             incident_id,
             attempt_id,
-            "timed out waiting for the promoted repair to become current production",
+            "timed out waiting for the promoted repair production build to become current",
         )
         .await?;
         return Ok(());
     }
 
-    match production::current_production_readiness(&vercel, deployment_id, commit_sha).await {
-        Ok(production::ProductionReadiness::Pending) => {
+    let production_deployment = match production::find_promoted_production(
+        &vercel,
+        vercel_project_id,
+        commit_sha,
+    )
+    .await
+    {
+        Ok(production::ProductionDiscovery::Pending) => {
             let next = poll + 1;
             database
                 .enqueue_after(
@@ -190,7 +196,7 @@ async fn verify_promoted_production(database: &Database, payload: &Value) -> any
                 .await?;
             return Ok(());
         }
-        Ok(production::ProductionReadiness::Ready) => {}
+        Ok(production::ProductionDiscovery::Ready(deployment)) => deployment,
         Err(error) => {
             legacy::begin_rollback_public(
                 database,
@@ -202,8 +208,19 @@ async fn verify_promoted_production(database: &Database, payload: &Value) -> any
             .await?;
             return Ok(());
         }
-    }
+    };
 
+    database
+        .save_deployment(
+            work.project_id,
+            &production_deployment.id,
+            "production",
+            &production_deployment.commit_sha,
+            &production_deployment.url,
+            "READY",
+            false,
+        )
+        .await?;
     if let Err(error) = legacy::require_healthy_public(&work.health_check_url).await {
         legacy::begin_rollback_public(database, &work, incident_id, attempt_id, &error.to_string())
             .await?;
@@ -219,7 +236,9 @@ async fn verify_promoted_production(database: &Database, payload: &Value) -> any
                 "incidentId": incident_id,
                 "attemptId": attempt_id,
                 "check": 0,
-                "phase": "promoted-production"
+                "phase": "promoted-production",
+                "productionDeploymentId": production_deployment.id,
+                "productionCommitSha": production_deployment.commit_sha
             }),
             3,
             10,
@@ -232,19 +251,12 @@ async fn watch_promoted_production(database: &Database, payload: &Value) -> anyh
     let incident_id = required_string(payload, "incidentId")?.parse()?;
     let attempt_id = required_string(payload, "attemptId")?.parse()?;
     let check = required_check(payload)?;
+    let deployment_id = required_string(payload, "productionDeploymentId")?;
+    let commit_sha = required_string(payload, "productionCommitSha")?;
     let work = database.incident_work(incident_id).await?;
     if work.state != IncidentState::VerifyingProduction {
         return Ok(());
     }
-    let attempt = database.repair_attempt(attempt_id).await?;
-    let deployment_id = attempt
-        .preview_deployment_id
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("promoted deployment id is missing"))?;
-    let commit_sha = attempt
-        .repair_commit_sha
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("repair commit SHA is missing"))?;
     let vercel = legacy::vercel_client_public(database, &work).await?;
 
     if let Err(error) =
@@ -271,7 +283,9 @@ async fn watch_promoted_production(database: &Database, payload: &Value) -> anyh
                     "incidentId": incident_id,
                     "attemptId": attempt_id,
                     "check": next,
-                    "phase": "promoted-production"
+                    "phase": "promoted-production",
+                    "productionDeploymentId": deployment_id,
+                    "productionCommitSha": commit_sha
                 }),
                 3,
                 10,
