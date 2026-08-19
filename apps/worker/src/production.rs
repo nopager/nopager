@@ -216,11 +216,8 @@ mod tests {
             Some(false),
             20,
         );
-        let candidate = newest_production_candidate(
-            vec![preview, production.clone()],
-            "repair-sha",
-        )
-        .unwrap();
+        let candidate =
+            newest_production_candidate(vec![preview, production.clone()], "repair-sha").unwrap();
         assert_eq!(candidate.id, production.id);
         assert!(deployment_matches_commit(&candidate, "repair-sha"));
         assert!(!deployment_matches_commit(&candidate, "preview-sha"));
