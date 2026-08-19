@@ -82,7 +82,10 @@ async fn ensure_durable_source_compatible(
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| anyhow::anyhow!("protected GitHub default branch metadata is missing"))?;
-    let protected_repo_id = work.github_metadata.get("repoId").and_then(serde_json::Value::as_u64);
+    let protected_repo_id = work
+        .github_metadata
+        .get("repoId")
+        .and_then(serde_json::Value::as_u64);
     let project = vercel.get_project(vercel_project_id).await?;
     validate_durable_source(
         &work.repo_owner,
@@ -116,7 +119,10 @@ fn validate_durable_source(
         );
     }
 
-    let linked_repo = link.repo.as_deref().filter(|value| !value.trim().is_empty());
+    let linked_repo = link
+        .repo
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
     if let Some(linked_repo) = linked_repo
         && !linked_repo.eq_ignore_ascii_case(protected_repo)
     {
@@ -283,7 +289,12 @@ mod tests {
         }
     }
 
-    fn github_link(owner: &str, repo: Option<&str>, repo_id: Option<u64>, branch: Option<&str>) -> ProjectLink {
+    fn github_link(
+        owner: &str,
+        repo: Option<&str>,
+        repo_id: Option<u64>,
+        branch: Option<&str>,
+    ) -> ProjectLink {
         ProjectLink {
             kind: Some("github".into()),
             org: Some(owner.into()),
@@ -296,32 +307,52 @@ mod tests {
     #[test]
     fn durable_source_merge_requires_matching_github_identity_and_branch() {
         let matching = github_link("Example", Some("App"), Some(42), Some("main"));
-        assert!(validate_durable_source("example", "app", Some(42), "main", Some(&matching)).is_ok());
+        assert!(
+            validate_durable_source("example", "app", Some(42), "main", Some(&matching)).is_ok()
+        );
 
         let wrong_owner = github_link("other", Some("app"), Some(42), Some("main"));
-        assert!(validate_durable_source("example", "app", Some(42), "main", Some(&wrong_owner)).is_err());
+        assert!(
+            validate_durable_source("example", "app", Some(42), "main", Some(&wrong_owner))
+                .is_err()
+        );
 
         let wrong_repo = github_link("example", Some("other"), Some(42), Some("main"));
-        assert!(validate_durable_source("example", "app", Some(42), "main", Some(&wrong_repo)).is_err());
+        assert!(
+            validate_durable_source("example", "app", Some(42), "main", Some(&wrong_repo)).is_err()
+        );
 
         let wrong_id = github_link("example", Some("app"), Some(99), Some("main"));
-        assert!(validate_durable_source("example", "app", Some(42), "main", Some(&wrong_id)).is_err());
+        assert!(
+            validate_durable_source("example", "app", Some(42), "main", Some(&wrong_id)).is_err()
+        );
 
         let wrong_branch = github_link("example", Some("app"), Some(42), Some("production"));
-        assert!(validate_durable_source("example", "app", Some(42), "main", Some(&wrong_branch)).is_err());
+        assert!(
+            validate_durable_source("example", "app", Some(42), "main", Some(&wrong_branch))
+                .is_err()
+        );
 
         let missing_identity = github_link("example", None, None, Some("main"));
-        assert!(validate_durable_source("example", "app", Some(42), "main", Some(&missing_identity)).is_err());
+        assert!(
+            validate_durable_source("example", "app", Some(42), "main", Some(&missing_identity))
+                .is_err()
+        );
 
         let missing_branch = github_link("example", Some("app"), Some(42), None);
-        assert!(validate_durable_source("example", "app", Some(42), "main", Some(&missing_branch)).is_err());
+        assert!(
+            validate_durable_source("example", "app", Some(42), "main", Some(&missing_branch))
+                .is_err()
+        );
         assert!(validate_durable_source("example", "app", Some(42), "main", None).is_err());
     }
 
     #[test]
     fn durable_source_can_prove_repository_by_id_when_name_is_absent() {
         let link = github_link("example", None, Some(42), Some("release"));
-        assert!(validate_durable_source("example", "app", Some(42), "release", Some(&link)).is_ok());
+        assert!(
+            validate_durable_source("example", "app", Some(42), "release", Some(&link)).is_ok()
+        );
     }
 
     #[test]
