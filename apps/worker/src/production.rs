@@ -11,6 +11,12 @@ pub(crate) struct ProductionDeployment {
     pub url: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProductionReadiness {
+    Pending,
+    Ready,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ProductionLanding {
     Pending { merge_sha: String },
@@ -58,29 +64,39 @@ pub(crate) async fn land_and_find_production(
         );
     }
 
-    let current = vercel.get_deployment(&candidate.id).await?;
+    match current_production_readiness(vercel, &candidate.id, &merge_sha).await? {
+        ProductionReadiness::Pending => Ok(ProductionLanding::Pending { merge_sha }),
+        ProductionReadiness::Ready => {
+            let current = vercel.get_deployment(&candidate.id).await?;
+            Ok(ProductionLanding::Ready(ProductionDeployment {
+                id: current.id,
+                commit_sha: merge_sha,
+                url: https_url(&current.url),
+            }))
+        }
+    }
+}
+
+pub(crate) async fn current_production_readiness(
+    vercel: &VercelClient,
+    deployment_id: &str,
+    commit_sha: &str,
+) -> anyhow::Result<ProductionReadiness> {
+    let current = vercel.get_deployment(deployment_id).await?;
     if deployment_failed(&current) {
+        anyhow::bail!("Vercel production deployment {deployment_id} failed");
+    }
+    if !deployment_matches_commit(&current, commit_sha) {
         anyhow::bail!(
-            "Vercel production deployment {} failed before becoming current",
-            current.id
+            "Vercel production deployment {deployment_id} no longer matches repair commit {commit_sha}"
         );
     }
     if current.ready_state.as_deref() != Some("READY")
         || current.target.as_deref() != Some("production")
     {
-        return Ok(ProductionLanding::Pending { merge_sha });
+        return Ok(ProductionReadiness::Pending);
     }
-    if !deployment_matches_commit(&current, &merge_sha) {
-        anyhow::bail!(
-            "Vercel current production deployment no longer matches merged repair {merge_sha}"
-        );
-    }
-
-    Ok(ProductionLanding::Ready(ProductionDeployment {
-        id: current.id,
-        commit_sha: merge_sha,
-        url: https_url(&current.url),
-    }))
+    Ok(ProductionReadiness::Ready)
 }
 
 pub(crate) async fn verify_current_production(
@@ -88,22 +104,12 @@ pub(crate) async fn verify_current_production(
     deployment_id: &str,
     commit_sha: &str,
 ) -> anyhow::Result<()> {
-    let current = vercel.get_deployment(deployment_id).await?;
-    if deployment_failed(&current) {
-        anyhow::bail!("Vercel production deployment {deployment_id} failed");
+    match current_production_readiness(vercel, deployment_id, commit_sha).await? {
+        ProductionReadiness::Ready => Ok(()),
+        ProductionReadiness::Pending => {
+            anyhow::bail!("Vercel production deployment {deployment_id} is not current/live yet")
+        }
     }
-    if current.ready_state.as_deref() != Some("READY") {
-        anyhow::bail!("Vercel production deployment {deployment_id} is no longer READY");
-    }
-    if current.target.as_deref() != Some("production") {
-        anyhow::bail!("Vercel production deployment {deployment_id} is no longer current/live");
-    }
-    if !deployment_matches_commit(&current, commit_sha) {
-        anyhow::bail!(
-            "Vercel production deployment {deployment_id} no longer matches repair commit {commit_sha}"
-        );
-    }
-    Ok(())
 }
 
 fn deployment_matches_commit(deployment: &Deployment, commit_sha: &str) -> bool {
