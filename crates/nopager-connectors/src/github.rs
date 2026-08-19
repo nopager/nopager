@@ -504,10 +504,12 @@ impl GitHubClient {
         validate_repair_pull_request(&pull_request, expected_head_sha, expected_base_sha)?;
 
         if pull_request.merged_at.is_some() {
-            return pull_request.merge_commit_sha.ok_or_else(|| ConnectorError::Api {
-                status: reqwest::StatusCode::BAD_GATEWAY,
-                message: "merged GitHub repair pull request omitted merge commit SHA".into(),
-            });
+            return pull_request
+                .merge_commit_sha
+                .ok_or_else(|| ConnectorError::Api {
+                    status: reqwest::StatusCode::BAD_GATEWAY,
+                    message: "merged GitHub repair pull request omitted merge commit SHA".into(),
+                });
         }
 
         if pull_request.draft {
@@ -538,7 +540,10 @@ impl GitHubClient {
         Ok(response.sha)
     }
 
-    async fn mark_pull_request_ready(&self, pull_request_node_id: &str) -> Result<(), ConnectorError> {
+    async fn mark_pull_request_ready(
+        &self,
+        pull_request_node_id: &str,
+    ) -> Result<(), ConnectorError> {
         if pull_request_node_id.trim().is_empty() {
             return Err(ConnectorError::InvalidConfiguration(
                 "GitHub pull request node id is empty".into(),
@@ -582,7 +587,8 @@ impl GitHubClient {
         {
             return Err(ConnectorError::Api {
                 status: reqwest::StatusCode::BAD_GATEWAY,
-                message: "GitHub did not confirm the repair pull request is ready for review".into(),
+                message: "GitHub did not confirm the repair pull request is ready for review"
+                    .into(),
             });
         }
         Ok(())
