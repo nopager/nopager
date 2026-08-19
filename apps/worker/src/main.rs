@@ -295,17 +295,18 @@ async fn watch_promoted_production(database: &Database, payload: &Value) -> anyh
     }
 
     database
-        .mark_deployment_known_good(work.project_id, deployment_id)
-        .await?;
-    database
         .record_audit_event(
             work.project_id,
             Some(incident_id),
             "worker",
-            "vercel.production.verified",
+            "vercel.production.promoted_verified",
             deployment_id,
             "success",
-            &json!({ "commitSha": commit_sha, "checks": 3 }),
+            &json!({
+                "commitSha": commit_sha,
+                "checks": 3,
+                "rollbackBaselineAdvanced": false
+            }),
         )
         .await?;
     database
@@ -547,6 +548,21 @@ async fn watch_durable_production(database: &Database, payload: &Value) -> anyho
 
     database
         .mark_deployment_known_good(work.project_id, deployment_id)
+        .await?;
+    database
+        .record_audit_event(
+            work.project_id,
+            Some(incident_id),
+            "worker",
+            "vercel.production.durable_verified",
+            deployment_id,
+            "success",
+            &json!({
+                "commitSha": commit_sha,
+                "checks": 3,
+                "rollbackBaselineAdvanced": true
+            }),
+        )
         .await?;
     database
         .transition_incident(IncidentTransition {
