@@ -138,7 +138,7 @@ pub(crate) async fn current_live_production_readiness(
     if deployment_failed(&current) {
         anyhow::bail!("Vercel production deployment {deployment_id} failed");
     }
-    Ok(explicit_live_production_readiness(&current))
+    Ok(production_readiness(&current))
 }
 
 pub(crate) async fn current_production_readiness(
@@ -176,14 +176,6 @@ fn production_readiness(deployment: &Deployment) -> ProductionReadiness {
         && deployment.target.as_deref() == Some("production")
     {
         ProductionReadiness::Ready
-    } else {
-        ProductionReadiness::Pending
-    }
-}
-
-fn explicit_live_production_readiness(deployment: &Deployment) -> ProductionReadiness {
-    if deployment.live == Some(true) {
-        production_readiness(deployment)
     } else {
         ProductionReadiness::Pending
     }
@@ -238,7 +230,6 @@ mod tests {
         sha: &str,
         ready: &str,
         target: Option<&str>,
-        live: Option<bool>,
         created: i64,
     ) -> Deployment {
         Deployment {
@@ -248,27 +239,20 @@ mod tests {
             state: None,
             created: Some(created),
             target: target.map(ToOwned::to_owned),
-            live,
+            live: None,
+            project_id: Some("prj_123".into()),
             meta: json!({ "githubCommitSha": sha }),
         }
     }
 
     #[test]
     fn production_candidate_must_match_commit_and_exclude_preview_build() {
-        let preview = deployment(
-            "dpl_preview",
-            "repair-sha",
-            "READY",
-            Some("preview"),
-            Some(false),
-            30,
-        );
+        let preview = deployment("dpl_preview", "repair-sha", "READY", Some("preview"), 30);
         let production = deployment(
             "dpl_production",
             "repair-sha",
             "BUILDING",
             Some("production"),
-            Some(false),
             20,
         );
         let candidate =
@@ -280,36 +264,15 @@ mod tests {
 
     #[test]
     fn newest_matching_production_build_wins() {
-        let old = deployment(
-            "dpl_old",
-            "merge-sha",
-            "READY",
-            Some("production"),
-            Some(false),
-            10,
-        );
-        let new = deployment(
-            "dpl_new",
-            "merge-sha",
-            "BUILDING",
-            Some("production"),
-            Some(false),
-            20,
-        );
+        let old = deployment("dpl_old", "merge-sha", "READY", Some("production"), 10);
+        let new = deployment("dpl_new", "merge-sha", "BUILDING", Some("production"), 20);
         let candidate = newest_production_candidate(vec![old, new], "merge-sha").unwrap();
         assert_eq!(candidate.id, "dpl_new");
     }
 
     #[test]
     fn production_readiness_requires_ready_current_target() {
-        let ready = deployment(
-            "dpl_ready",
-            "merge-sha",
-            "READY",
-            Some("production"),
-            Some(true),
-            1,
-        );
+        let ready = deployment("dpl_ready", "merge-sha", "READY", Some("production"), 1);
         assert_eq!(production_readiness(&ready), ProductionReadiness::Ready);
 
         let building = deployment(
@@ -317,7 +280,6 @@ mod tests {
             "merge-sha",
             "BUILDING",
             Some("production"),
-            Some(true),
             1,
         );
         assert_eq!(
@@ -325,39 +287,8 @@ mod tests {
             ProductionReadiness::Pending
         );
 
-        let stale = deployment("dpl_stale", "merge-sha", "READY", None, Some(false), 1);
+        let stale = deployment("dpl_stale", "merge-sha", "READY", None, 1);
         assert_eq!(production_readiness(&stale), ProductionReadiness::Pending);
-    }
-
-    #[test]
-    fn rollback_readiness_requires_explicit_live_signal() {
-        let live = deployment(
-            "dpl_live",
-            "known-good",
-            "READY",
-            Some("production"),
-            Some(true),
-            1,
-        );
-        assert_eq!(
-            explicit_live_production_readiness(&live),
-            ProductionReadiness::Ready
-        );
-
-        for live_signal in [None, Some(false)] {
-            let ambiguous = deployment(
-                "dpl_not_live",
-                "known-good",
-                "READY",
-                Some("production"),
-                live_signal,
-                1,
-            );
-            assert_eq!(
-                explicit_live_production_readiness(&ambiguous),
-                ProductionReadiness::Pending
-            );
-        }
     }
 
     #[test]
@@ -368,7 +299,6 @@ mod tests {
                 "merge-sha",
                 state,
                 Some("production"),
-                Some(false),
                 1,
             )));
         }
@@ -377,7 +307,6 @@ mod tests {
             "merge-sha",
             "READY",
             Some("production"),
-            Some(true),
             1,
         )));
     }
