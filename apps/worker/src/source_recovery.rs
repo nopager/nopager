@@ -85,7 +85,9 @@ pub(crate) async fn prepare_draft_source_revert(
         }
         Ok(RevertPullRequestOutcome::ExistingCandidate(pull_request)) => {
             let metadata = revert_metadata(&pull_request);
-            if trusted_created_revert_exists(database, incident_id, &identity(&pull_request)).await? {
+            if trusted_created_revert_exists(database, incident_id, &identity(&pull_request))
+                .await?
+            {
                 enqueue_source_revert_review(database, incident_id, &pull_request, 0, 30).await?;
                 transition_to_source_revert_review(
                     database,
@@ -197,28 +199,22 @@ pub(crate) async fn verify_source_revert_review(
     }
 
     let auth = crate::legacy::github_auth_public(database, &work).await?;
-    let status = match get_pull_request_status(
-        &auth,
-        &work.repo_owner,
-        &work.repo_name,
-        expected.number,
-    )
-    .await
-    {
-        Ok(status) => status,
-        Err(error) => {
-            audit_source_recovery_failure(
-                database,
-                &work,
-                incident_id,
-                "github.repair_pr.revert_review",
-                &expected.number.to_string(),
-                &error.to_string(),
-            )
-            .await?;
-            return Ok(());
-        }
-    };
+    let status =
+        match get_pull_request_status(&auth, &work.repo_owner, &work.repo_name, expected.number).await {
+            Ok(status) => status,
+            Err(error) => {
+                audit_source_recovery_failure(
+                    database,
+                    &work,
+                    incident_id,
+                    "github.repair_pr.revert_review",
+                    &expected.number.to_string(),
+                    &error.to_string(),
+                )
+                .await?;
+                return Ok(());
+            }
+        };
 
     if !pull_request_identity_matches(&status, &expected) {
         audit_source_recovery_failure(
@@ -332,48 +328,39 @@ pub(crate) async fn verify_source_recovery_production(
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("Vercel project id is missing"))?;
     let vercel = crate::legacy::vercel_client_public(database, &work).await?;
-    let deployment = match production::find_current_production_for_commit(
-        &vercel,
-        vercel_project_id,
-        merge_sha,
-    )
-    .await
-    {
-        Ok(ProductionDiscovery::Pending) => {
-            enqueue_source_recovery_production(
-                database,
-                incident_id,
-                &expected,
-                merge_sha,
-                poll + 1,
-            )
-            .await?;
-            return Ok(());
-        }
-        Ok(ProductionDiscovery::Ready(deployment)) => deployment,
-        Err(error) => {
-            audit_source_recovery_failure(
-                database,
-                &work,
-                incident_id,
-                "vercel.source_recovery.production",
-                merge_sha,
-                &error.to_string(),
-            )
-            .await?;
-            return Ok(());
-        }
-    };
+    let deployment =
+        match production::find_current_production_for_commit(&vercel, vercel_project_id, merge_sha)
+            .await
+        {
+            Ok(ProductionDiscovery::Pending) => {
+                enqueue_source_recovery_production(
+                    database,
+                    incident_id,
+                    &expected,
+                    merge_sha,
+                    poll + 1,
+                )
+                .await?;
+                return Ok(());
+            }
+            Ok(ProductionDiscovery::Ready(deployment)) => deployment,
+            Err(error) => {
+                audit_source_recovery_failure(
+                    database,
+                    &work,
+                    incident_id,
+                    "vercel.source_recovery.production",
+                    merge_sha,
+                    &error.to_string(),
+                )
+                .await?;
+                return Ok(());
+            }
+        };
 
     if !authoritative_current_target_matches(&vercel, vercel_project_id, &deployment.id).await? {
-        enqueue_source_recovery_production(
-            database,
-            incident_id,
-            &expected,
-            merge_sha,
-            poll + 1,
-        )
-        .await?;
+        enqueue_source_recovery_production(database, incident_id, &expected, merge_sha, poll + 1)
+            .await?;
         return Ok(());
     }
 
@@ -404,7 +391,10 @@ pub(crate) async fn verify_source_recovery_production(
     database
         .enqueue_after(
             JobType::PostDeployWatch,
-            &format!("incident:{incident_id}:source-recovery-watch:0:{}", deployment.id),
+            &format!(
+                "incident:{incident_id}:source-recovery-watch:0:{}",
+                deployment.id
+            ),
             Some(incident_id),
             &json!({
                 "incidentId": incident_id,
@@ -453,7 +443,9 @@ pub(crate) async fn watch_source_recovery_production(
     let verification = async {
         production::verify_current_production(&vercel, deployment_id, merge_sha).await?;
         if !authoritative_current_target_matches(&vercel, vercel_project_id, deployment_id).await? {
-            anyhow::bail!("source-recovery deployment is no longer the authoritative Production target");
+            anyhow::bail!(
+                "source-recovery deployment is no longer the authoritative Production target"
+            );
         }
         crate::legacy::require_healthy_public(&work.health_check_url).await
     }
