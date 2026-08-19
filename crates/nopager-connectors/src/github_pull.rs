@@ -53,6 +53,11 @@ struct GitObject {
     sha: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct GitRefResponse {
+    object: GitObject,
+}
+
 pub async fn get_pull_request_status(
     auth: &GitHubAppAuth,
     owner: &str,
@@ -77,6 +82,35 @@ pub async fn get_pull_request_status(
     )
     .await?;
     pull_request_status(response)
+}
+
+pub async fn get_branch_head(
+    auth: &GitHubAppAuth,
+    owner: &str,
+    repository: &str,
+    branch: &str,
+) -> Result<String, ConnectorError> {
+    validate_segment(owner, "owner")?;
+    validate_segment(repository, "repository")?;
+    validate_git_ref(branch, "branch")?;
+
+    let http = github_http_client()?;
+    let token = installation_token(auth, repository, &http).await?;
+    let path = format!("repos/{owner}/{repository}/git/ref/heads/{branch}");
+    let response: GitRefResponse = decode(
+        request(&http, auth, &token, reqwest::Method::GET, &path)?
+            .send()
+            .await?,
+    )
+    .await?;
+    let sha = response.object.sha;
+    if sha.trim().is_empty() {
+        return Err(ConnectorError::Api {
+            status: reqwest::StatusCode::BAD_GATEWAY,
+            message: "GitHub branch ref response omitted object SHA".into(),
+        });
+    }
+    Ok(sha)
 }
 
 fn pull_request_status(response: PullRequestResponse) -> Result<PullRequestStatus, ConnectorError> {
@@ -132,6 +166,7 @@ async fn installation_token(
         .json(&serde_json::json!({
             "repositories": [repository],
             "permissions": {
+                "contents": "read",
                 "pull_requests": "read"
             }
         }))
@@ -197,6 +232,34 @@ fn validate_segment(value: &str, label: &str) -> Result<(), ConnectorError> {
     Ok(())
 }
 
+fn validate_git_ref(value: &str, label: &str) -> Result<(), ConnectorError> {
+    let invalid_component = value.split('/').any(|component| {
+        component.is_empty()
+            || component.starts_with('.')
+            || component.ends_with('.')
+            || component.ends_with(".lock")
+    });
+    let invalid_character = value.chars().any(|character| {
+        character.is_ascii_control()
+            || character == ' '
+            || matches!(character, '~' | '^' | ':' | '?' | '*' | '[' | '\\')
+    });
+    if value.is_empty()
+        || value == "@"
+        || value.starts_with('/')
+        || value.ends_with('/')
+        || value.contains("..")
+        || value.contains("@{")
+        || invalid_component
+        || invalid_character
+    {
+        return Err(ConnectorError::InvalidConfiguration(format!(
+            "invalid {label}"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,5 +296,12 @@ mod tests {
         let mut value = response(false);
         value.node_id.clear();
         assert!(pull_request_status(value).is_err());
+    }
+
+    #[test]
+    fn accepts_protected_branch_names_with_path_components() {
+        assert!(validate_git_ref("main", "branch").is_ok());
+        assert!(validate_git_ref("release/2026.08", "branch").is_ok());
+        assert!(validate_git_ref("feature//bad", "branch").is_err());
     }
 }
