@@ -47,9 +47,44 @@ pub struct DeploymentList {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProjectDetails {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub link: Option<ProjectLink>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectLink {
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub org: Option<String>,
+    #[serde(default)]
+    pub repo: Option<String>,
+    #[serde(default)]
+    pub repo_id: Option<u64>,
+    #[serde(default)]
+    pub production_branch: Option<String>,
+}
+
+impl ProjectDetails {
+    pub fn github_link(&self) -> Option<&ProjectLink> {
+        let link = self.link.as_ref()?;
+        match link.kind.as_deref() {
+            Some("github" | "github-limited") => Some(link),
+            _ => None,
+        }
+    }
+
+    pub fn git_production_branch(&self) -> Option<&str> {
+        self.github_link()?
+            .production_branch
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -464,6 +499,51 @@ mod tests {
         let client = VercelClient::new(SecretString::from("token".to_owned()), Some("   ".into()))
             .expect("valid client");
         assert!(client.team_id.is_none());
+    }
+
+    #[test]
+    fn project_git_link_requires_github_and_explicit_production_branch() {
+        for kind in ["github", "github-limited"] {
+            let project: ProjectDetails = serde_json::from_value(json!({
+                "id": "prj_1",
+                "name": "demo",
+                "link": {
+                    "type": kind,
+                    "org": "example",
+                    "repo": "app",
+                    "repoId": 42,
+                    "productionBranch": "release"
+                }
+            }))
+            .unwrap();
+            assert!(project.github_link().is_some());
+            assert_eq!(project.git_production_branch(), Some("release"));
+        }
+
+        let gitlab: ProjectDetails = serde_json::from_value(json!({
+            "id": "prj_1",
+            "name": "demo",
+            "link": { "type": "gitlab", "productionBranch": "main" }
+        }))
+        .unwrap();
+        assert!(gitlab.github_link().is_none());
+        assert_eq!(gitlab.git_production_branch(), None);
+
+        let missing_branch: ProjectDetails = serde_json::from_value(json!({
+            "id": "prj_1",
+            "name": "demo",
+            "link": { "type": "github", "org": "example", "repo": "app" }
+        }))
+        .unwrap();
+        assert!(missing_branch.github_link().is_some());
+        assert_eq!(missing_branch.git_production_branch(), None);
+
+        let no_git_link: ProjectDetails = serde_json::from_value(json!({
+            "id": "prj_1",
+            "name": "demo"
+        }))
+        .unwrap();
+        assert!(no_git_link.github_link().is_none());
     }
 
     #[test]
