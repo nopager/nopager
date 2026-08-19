@@ -11,6 +11,8 @@ use crate::{ConnectorError, decode, expect_success};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const PREVIEW_SECRETS_OVERRIDE: &str = "NOPAGER_ALLOW_PREVIEW_SECRETS";
+const VERCEL_PAGE_LIMIT: u8 = 100;
+const MAX_ENVIRONMENT_VARIABLE_PAGES: usize = 10;
 
 #[derive(Clone)]
 pub struct VercelClient {
@@ -62,10 +64,18 @@ pub struct ProjectEnvironmentVariable {
     pub git_branch: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct Pagination {
+    #[serde(default)]
+    next: Option<i64>,
+}
+
 #[derive(Debug, Deserialize)]
 struct ProjectEnvironmentVariableList {
     #[serde(default)]
     envs: Vec<ProjectEnvironmentVariable>,
+    #[serde(default)]
+    pagination: Pagination,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -171,16 +181,32 @@ impl VercelClient {
         project_id_or_name: &str,
     ) -> Result<Vec<ProjectEnvironmentVariable>, ConnectorError> {
         validate_id(project_id_or_name)?;
-        let response = self
-            .request(
-                Method::GET,
-                &format!("v9/projects/{project_id_or_name}/env"),
-            )?
-            .send()
-            .await?;
-        Ok(decode::<ProjectEnvironmentVariableList>(response)
-            .await?
-            .envs)
+        let path = format!("v9/projects/{project_id_or_name}/env");
+        let limit = VERCEL_PAGE_LIMIT.to_string();
+        let mut variables = Vec::new();
+        let mut until = None;
+
+        for _ in 0..MAX_ENVIRONMENT_VARIABLE_PAGES {
+            let mut request = self
+                .request(Method::GET, &path)?
+                .query(&[("limit", limit.as_str())]);
+            let cursor = until.map(|value: i64| value.to_string());
+            if let Some(cursor) = &cursor {
+                request = request.query(&[("until", cursor.as_str())]);
+            }
+            let page = decode::<ProjectEnvironmentVariableList>(request.send().await?).await?;
+            variables.extend(page.envs);
+
+            match next_page_cursor(until, page.pagination.next)? {
+                Some(next) => until = Some(next),
+                None => return Ok(variables),
+            }
+        }
+
+        Err(ConnectorError::InvalidConfiguration(format!(
+            "Vercel environment variable metadata exceeds the bounded safety scan of {} records; reduce Preview variables before AI-authored Preview deployment",
+            VERCEL_PAGE_LIMIT as usize * MAX_ENVIRONMENT_VARIABLE_PAGES
+        )))
     }
 
     pub async fn create_preview(
@@ -249,6 +275,18 @@ impl VercelClient {
         )
         .await
     }
+}
+
+fn next_page_cursor(
+    current: Option<i64>,
+    next: Option<i64>,
+) -> Result<Option<i64>, ConnectorError> {
+    if next.is_some() && next == current {
+        return Err(ConnectorError::InvalidConfiguration(
+            "Vercel pagination cursor did not advance while scanning environment variables".into(),
+        ));
+    }
+    Ok(next)
 }
 
 fn preview_payload(project_name: &str, source: &GitSource) -> Value {
@@ -398,6 +436,36 @@ mod tests {
         let client = VercelClient::new(SecretString::from("token".to_owned()), Some("   ".into()))
             .expect("valid client");
         assert!(client.team_id.is_none());
+    }
+
+    #[test]
+    fn environment_variable_page_reads_next_cursor() {
+        let page: ProjectEnvironmentVariableList = serde_json::from_value(json!({
+            "envs": [],
+            "pagination": { "count": 100, "next": 1_725_000_000_000_i64, "prev": null }
+        }))
+        .expect("valid Vercel page");
+        assert_eq!(page.pagination.next, Some(1_725_000_000_000));
+    }
+
+    #[test]
+    fn environment_variable_page_without_pagination_is_complete() {
+        let page: ProjectEnvironmentVariableList =
+            serde_json::from_value(json!({ "envs": [] })).expect("valid Vercel page");
+        assert_eq!(page.pagination.next, None);
+    }
+
+    #[test]
+    fn repeated_environment_variable_cursor_fails_closed() {
+        assert!(next_page_cursor(Some(123), Some(123)).is_err());
+        assert_eq!(
+            next_page_cursor(Some(123), None).expect("complete page"),
+            None
+        );
+        assert_eq!(
+            next_page_cursor(Some(123), Some(122)).expect("advanced cursor"),
+            Some(122)
+        );
     }
 
     #[test]
