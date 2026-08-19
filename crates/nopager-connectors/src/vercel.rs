@@ -109,7 +109,7 @@ impl ProjectDetails {
     pub fn current_production_target(&self) -> Option<&ProjectTarget> {
         let target = self.targets.get("production")?.as_ref()?;
         if target.ready_state.as_deref() != Some("READY")
-            || target.ready_substate.as_deref() != Some("PROMOTED")
+            || matches!(target.ready_substate.as_deref(), Some("STAGED" | "ROLLING"))
         {
             return None;
         }
@@ -660,20 +660,24 @@ mod tests {
     }
 
     #[test]
-    fn project_production_target_requires_ready_and_promoted() {
-        let current = project_with_production_target("READY", Some("PROMOTED"));
-        assert_eq!(
-            current
-                .current_production_target()
-                .map(|target| target.id.as_str()),
-            Some("dpl_current")
-        );
+    fn project_production_target_accepts_ready_without_optional_substate() {
+        for substate in [Some("PROMOTED"), None] {
+            let current = project_with_production_target("READY", substate);
+            assert_eq!(
+                current
+                    .current_production_target()
+                    .map(|target| target.id.as_str()),
+                Some("dpl_current")
+            );
+        }
+    }
 
+    #[test]
+    fn project_production_target_rejects_unready_or_incomplete_rollout() {
         for (state, substate) in [
             ("BUILDING", Some("PROMOTED")),
             ("READY", Some("ROLLING")),
             ("READY", Some("STAGED")),
-            ("READY", None),
         ] {
             assert!(
                 project_with_production_target(state, substate)
