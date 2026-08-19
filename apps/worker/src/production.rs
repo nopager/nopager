@@ -18,9 +18,23 @@ pub(crate) enum ProductionReadiness {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProductionDiscovery {
+    Pending,
+    Ready(ProductionDeployment),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ProductionLanding {
     Pending { merge_sha: String },
     Ready(ProductionDeployment),
+}
+
+pub(crate) async fn find_promoted_production(
+    vercel: &VercelClient,
+    vercel_project_id: &str,
+    repair_commit_sha: &str,
+) -> anyhow::Result<ProductionDiscovery> {
+    find_current_production_for_commit(vercel, vercel_project_id, repair_commit_sha).await
 }
 
 pub(crate) async fn land_and_find_production(
@@ -49,12 +63,20 @@ pub(crate) async fn land_and_find_production(
         )
         .await?;
 
+    match find_current_production_for_commit(vercel, vercel_project_id, &merge_sha).await? {
+        ProductionDiscovery::Pending => Ok(ProductionLanding::Pending { merge_sha }),
+        ProductionDiscovery::Ready(deployment) => Ok(ProductionLanding::Ready(deployment)),
+    }
+}
+
+async fn find_current_production_for_commit(
+    vercel: &VercelClient,
+    vercel_project_id: &str,
+    commit_sha: &str,
+) -> anyhow::Result<ProductionDiscovery> {
     let deployments = vercel.list_deployments(vercel_project_id, 50).await?;
-    let Some(candidate) = deployments
-        .into_iter()
-        .find(|deployment| deployment_matches_commit(deployment, &merge_sha))
-    else {
-        return Ok(ProductionLanding::Pending { merge_sha });
+    let Some(candidate) = newest_production_candidate(deployments, commit_sha) else {
+        return Ok(ProductionDiscovery::Pending);
     };
 
     if deployment_failed(&candidate) {
@@ -64,13 +86,13 @@ pub(crate) async fn land_and_find_production(
         );
     }
 
-    match current_production_readiness(vercel, &candidate.id, &merge_sha).await? {
-        ProductionReadiness::Pending => Ok(ProductionLanding::Pending { merge_sha }),
+    match current_production_readiness(vercel, &candidate.id, commit_sha).await? {
+        ProductionReadiness::Pending => Ok(ProductionDiscovery::Pending),
         ProductionReadiness::Ready => {
             let current = vercel.get_deployment(&candidate.id).await?;
-            Ok(ProductionLanding::Ready(ProductionDeployment {
+            Ok(ProductionDiscovery::Ready(ProductionDeployment {
                 id: current.id,
-                commit_sha: merge_sha,
+                commit_sha: commit_sha.to_owned(),
                 url: https_url(&current.url),
             }))
         }
@@ -112,6 +134,19 @@ pub(crate) async fn verify_current_production(
     }
 }
 
+fn newest_production_candidate(
+    deployments: Vec<Deployment>,
+    commit_sha: &str,
+) -> Option<Deployment> {
+    deployments
+        .into_iter()
+        .filter(|deployment| {
+            deployment.target.as_deref() == Some("production")
+                && deployment_matches_commit(deployment, commit_sha)
+        })
+        .max_by_key(|deployment| deployment.created.unwrap_or_default())
+}
+
 fn deployment_matches_commit(deployment: &Deployment, commit_sha: &str) -> bool {
     deployment
         .meta
@@ -143,13 +178,20 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn deployment(sha: &str, ready: &str, target: Option<&str>, live: Option<bool>) -> Deployment {
+    fn deployment(
+        id: &str,
+        sha: &str,
+        ready: &str,
+        target: Option<&str>,
+        live: Option<bool>,
+        created: i64,
+    ) -> Deployment {
         Deployment {
-            id: "dpl_repair".into(),
-            url: "repair.example.vercel.app".into(),
+            id: id.into(),
+            url: format!("{id}.example.vercel.app"),
             ready_state: Some(ready.into()),
             state: None,
-            created: None,
+            created: Some(created),
             target: target.map(ToOwned::to_owned),
             live,
             meta: json!({ "githubCommitSha": sha }),
@@ -157,27 +199,74 @@ mod tests {
     }
 
     #[test]
-    fn production_candidate_must_match_the_merge_commit() {
-        let candidate = deployment("merge-sha", "READY", Some("production"), Some(true));
-        assert!(deployment_matches_commit(&candidate, "merge-sha"));
+    fn production_candidate_must_match_commit_and_exclude_preview_build() {
+        let preview = deployment(
+            "dpl_preview",
+            "repair-sha",
+            "READY",
+            Some("preview"),
+            Some(false),
+            30,
+        );
+        let production = deployment(
+            "dpl_production",
+            "repair-sha",
+            "BUILDING",
+            Some("production"),
+            Some(false),
+            20,
+        );
+        let candidate = newest_production_candidate(
+            vec![preview, production.clone()],
+            "repair-sha",
+        )
+        .unwrap();
+        assert_eq!(candidate.id, production.id);
+        assert!(deployment_matches_commit(&candidate, "repair-sha"));
         assert!(!deployment_matches_commit(&candidate, "preview-sha"));
+    }
+
+    #[test]
+    fn newest_matching_production_build_wins() {
+        let old = deployment(
+            "dpl_old",
+            "merge-sha",
+            "READY",
+            Some("production"),
+            Some(false),
+            10,
+        );
+        let new = deployment(
+            "dpl_new",
+            "merge-sha",
+            "BUILDING",
+            Some("production"),
+            Some(false),
+            20,
+        );
+        let candidate = newest_production_candidate(vec![old, new], "merge-sha").unwrap();
+        assert_eq!(candidate.id, "dpl_new");
     }
 
     #[test]
     fn failed_production_build_is_not_treated_as_pending_success() {
         for state in ["ERROR", "CANCELED", "CANCELLED"] {
             assert!(deployment_failed(&deployment(
+                "dpl_failed",
                 "merge-sha",
                 state,
                 Some("production"),
-                Some(false)
+                Some(false),
+                1,
             )));
         }
         assert!(!deployment_failed(&deployment(
+            "dpl_ready",
             "merge-sha",
             "READY",
             Some("production"),
-            Some(true)
+            Some(true),
+            1,
         )));
     }
 
