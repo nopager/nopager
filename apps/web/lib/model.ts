@@ -88,7 +88,9 @@ export function maskSecret(lastFour: string): string {
   return `••••••••${lastFour.slice(-4)}`;
 }
 
-function sourceRecoveryKind(value: unknown): SourceRecoveryAction["kind"] | null {
+function sourceRecoveryKind(
+  value: unknown,
+): SourceRecoveryAction["kind"] | null {
   switch (value) {
     case "review_source_revert":
     case "verify_existing_source_revert":
