@@ -28,13 +28,15 @@ sh scripts/quickstart.sh
 
 The bootstrap script creates `.env` when needed, generates a random PostgreSQL password plus random 32-byte `NOPAGER_MASTER_KEY` and `NOPAGER_ADMIN_TOKEN` secrets, detects the Docker socket group on Linux, starts PostgreSQL/API/Worker/Web, and waits for the API plus web console to become ready. On a clean Git checkout it first tries to pull prebuilt amd64/arm64 application images for that exact Git commit from GitHub Container Registry; if those images are unavailable or the local source tree has been modified, it falls back to building locally. Existing Alpha installs keep their existing non-empty secrets, and the bootstrap recognizes the earlier fixed PostgreSQL credential so an existing volume is not silently made unbootable during upgrade.
 
-Then open:
+For a local evaluation, open:
 
 ```text
 http://localhost:3000/setup
 ```
 
-The setup wizard creates the local administrator and validates GitHub, Vercel, the model provider, the production health URL, and the selected safety mode before it stores the protected app. GitHub repository ID/default branch and the canonical Vercel project metadata are discovered automatically.
+For a real externally reachable installation, put the trusted HTTPS reverse proxy in place first and open the setup wizard through the **final public console origin** (for example `https://nopager.example.com/setup`) before starting automatic GitHub App setup. The GitHub Manifest flow intentionally uses the browser origin for its callback and workflow-run webhook. When setup is run from localhost, the generated GitHub webhook is created inactive because GitHub cannot deliver production events to a loopback URL.
+
+The setup wizard creates the local administrator and validates GitHub, Vercel, the model provider, the production health URL, and the selected safety mode before it stores the protected app. The recommended GitHub path uses GitHub App Manifest registration to create the least-privilege App without a central NoPager service; manual App credentials remain available as a fallback for organizations that disallow manifest registration. GitHub repository ID/default branch and canonical Vercel project metadata are discovered automatically. The AI step can load the models available to the supplied BYOK account and verifies the selected model with a small structured-output capability probe. The production step can safely probe common health endpoints before falling back to a manually entered URL.
 
 For setup and operations, see:
 
@@ -155,7 +157,7 @@ For design-partner validation, use:
 - GitHub and Vercel are the only production connectors.
 - One administrator and one protected app per OSS installation.
 - Preview verification uses HTTP health checks; browser verification is planned after Alpha.
-- Initial GitHub App/Vercel credentials are still entered manually, but repository/project metadata is discovered and tested by the wizard.
+- Recommended GitHub setup uses GitHub App Manifest registration and repository-scoped installation; manual App ID/installation ID/private-key entry remains only as a fallback. Vercel access tokens and model-provider API keys are still BYOK/manual credentials. Team ID remains optional for personal Vercel projects, while repository/project metadata, provider model availability, and common health endpoints are discovered by the wizard.
 - External design-partner readiness still requires the real dogfood scenarios in the acceptance plan; CI alone is not treated as proof of safe production behavior.
 - No Kubernetes, general observability backend, infrastructure provisioning, Team/RBAC/billing, or automatic high-risk database/IAM/DNS actions.
 
