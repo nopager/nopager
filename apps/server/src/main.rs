@@ -105,6 +105,12 @@ struct HealthConnectionRequest {
     url: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HealthDiscoveryRequest {
+    production_url: String,
+}
+
 #[derive(Clone)]
 struct ServerState {
     database: Option<Database>,
@@ -396,6 +402,60 @@ async fn test_provider_connection(
         },
         Err(()) => api_error(StatusCode::BAD_REQUEST, "unsupported_provider"),
     }
+}
+
+async fn discover_health_connection(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Json(request): Json<HealthDiscoveryRequest>,
+) -> (StatusCode, Json<Value>) {
+    if !authorized(&state, &headers).await {
+        return api_error(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    let production_url = match Url::parse(&request.production_url) {
+        Ok(url) if validate_health_url(&url).is_ok() => url,
+        _ => return api_error(StatusCode::BAD_REQUEST, "unsafe_production_url"),
+    };
+    let candidates = health_discovery_candidates(&production_url);
+    for candidate in &candidates {
+        if validate_health_url(candidate).is_err() {
+            continue;
+        }
+        if let Ok(observation) = check_http(candidate, 200, std::time::Duration::from_secs(5)).await
+            && observation.success
+        {
+            return (
+                StatusCode::OK,
+                Json(json!({
+                    "found": true,
+                    "url": candidate.as_str(),
+                    "attempted": candidates.len()
+                })),
+            );
+        }
+    }
+    (
+        StatusCode::OK,
+        Json(json!({ "found": false, "attempted": candidates.len() })),
+    )
+}
+
+fn health_discovery_candidates(production_url: &Url) -> Vec<Url> {
+    let mut candidates = Vec::new();
+    let mut exact = production_url.clone();
+    exact.set_fragment(None);
+    candidates.push(exact);
+
+    for path in ["/health", "/healthz", "/api/health", "/api/healthz"] {
+        let mut candidate = production_url.clone();
+        candidate.set_path(path);
+        candidate.set_query(None);
+        candidate.set_fragment(None);
+        if !candidates.iter().any(|existing| existing == &candidate) {
+            candidates.push(candidate);
+        }
+    }
+    candidates
 }
 
 async fn test_health_connection(
@@ -1153,6 +1213,10 @@ async fn main() -> anyhow::Result<()> {
             post(test_provider_connection),
         )
         .route("/api/v1/setup/test/health", post(test_health_connection))
+        .route(
+            "/api/v1/setup/discover/health",
+            post(discover_health_connection),
+        )
         .route("/api/v1/setup/app", post(protect_app))
         .route("/api/v1/auth/login", post(login))
         .route("/api/v1/protection/pause", post(pause))
@@ -1197,6 +1261,33 @@ mod tests {
             admin_token: Some(Arc::from(b"test-admin-token".as_slice())),
             secret_cipher: None,
         }
+    }
+
+    #[test]
+    fn health_discovery_is_small_deterministic_and_same_origin() {
+        let production = Url::parse("https://example.com/app?tenant=alpha#section").unwrap();
+        let candidates = health_discovery_candidates(&production);
+        assert_eq!(
+            candidates.iter().map(Url::as_str).collect::<Vec<_>>(),
+            vec![
+                "https://example.com/app?tenant=alpha",
+                "https://example.com/health",
+                "https://example.com/healthz",
+                "https://example.com/api/health",
+                "https://example.com/api/healthz",
+            ]
+        );
+        assert!(candidates.iter().all(|candidate| {
+            candidate.scheme() == "https" && candidate.host_str() == Some("example.com")
+        }));
+    }
+
+    #[test]
+    fn health_discovery_deduplicates_exact_health_path() {
+        let production = Url::parse("https://example.com/health").unwrap();
+        let candidates = health_discovery_candidates(&production);
+        assert_eq!(candidates.len(), 4);
+        assert_eq!(candidates[0].as_str(), "https://example.com/health");
     }
 
     #[tokio::test]
