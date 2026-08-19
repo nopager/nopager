@@ -59,9 +59,10 @@ impl SetupProvider {
         model: String,
         base_url: Url,
     ) -> Result<Self, ProviderError> {
-        if api_key.expose_secret().trim().is_empty() || model.trim().is_empty() {
+        if api_key.expose_secret().trim().is_empty() {
             return Err(ProviderError::Authentication);
         }
+        validate_model_id(&model)?;
         Self::build(kind, api_key, model, base_url)
     }
 
@@ -117,21 +118,36 @@ impl SetupProvider {
     }
 
     pub(crate) async fn test_connection(&self) -> Result<(), ProviderError> {
-        let models = self.list_models().await?;
-        if !models.iter().any(|model| model.id == self.model) {
-            return Err(ProviderError::ModelUnavailable(self.model.clone()));
-        }
+        self.ensure_model_available().await?;
         self.capability_probe().await
     }
 
+    async fn ensure_model_available(&self) -> Result<(), ProviderError> {
+        let path = model_lookup_path(self.kind, &self.model)?;
+        let response = self
+            .request(Method::GET, &path)?
+            .send()
+            .await
+            .map_err(request_error)?;
+        let status = response.status();
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            return Err(ProviderError::Authentication);
+        }
+        if status == StatusCode::NOT_FOUND {
+            return Err(ProviderError::ModelUnavailable(self.model.clone()));
+        }
+        if !status.is_success() {
+            return Err(ProviderError::Request(format!(
+                "provider returned {status} while checking model availability"
+            )));
+        }
+        Ok(())
+    }
+
     async fn list_models(&self) -> Result<Vec<AvailableModel>, ProviderError> {
-        let path = match self.kind {
-            ProviderKind::OpenAi => "models",
-            ProviderKind::Anthropic => "models?limit=100",
-            ProviderKind::Gemini => "v1beta/models?pageSize=1000",
-        };
+        let path = model_list_path(self.kind);
         let response = decode_json(
-            self.request(Method::GET, path)?
+            self.request(Method::GET, &path)?
                 .send()
                 .await
                 .map_err(request_error)?,
@@ -253,6 +269,37 @@ pub(crate) async fn discover_available_models(
     SetupProvider::for_discovery(kind, api_key, kind.base_url())?
         .list_models()
         .await
+}
+
+fn model_list_path(kind: ProviderKind) -> String {
+    match kind {
+        ProviderKind::OpenAi => "models".to_owned(),
+        ProviderKind::Anthropic => format!("models?limit={MAX_DISCOVERED_MODELS}"),
+        ProviderKind::Gemini => format!("v1beta/models?pageSize={MAX_DISCOVERED_MODELS}"),
+    }
+}
+
+fn model_lookup_path(kind: ProviderKind, model: &str) -> Result<String, ProviderError> {
+    validate_model_id(model)?;
+    Ok(match kind {
+        ProviderKind::OpenAi | ProviderKind::Anthropic => format!("models/{model}"),
+        ProviderKind::Gemini => format!("v1beta/models/{model}"),
+    })
+}
+
+fn validate_model_id(model: &str) -> Result<(), ProviderError> {
+    let model = model.trim();
+    if model.is_empty()
+        || model.len() > 256
+        || model.contains('/')
+        || model.contains('\\')
+        || model.contains('?')
+        || model.contains('#')
+        || model.contains("..")
+    {
+        return Err(ProviderError::Request("invalid model id".to_owned()));
+    }
+    Ok(())
 }
 
 fn parse_available_models(
@@ -437,6 +484,33 @@ mod tests {
             parse_available_models(ProviderKind::OpenAi, &json!({"models": []})),
             Err(ProviderError::Decode)
         ));
+    }
+
+    #[test]
+    fn model_discovery_and_exact_lookup_paths_are_bounded_and_safe() {
+        assert_eq!(model_list_path(ProviderKind::OpenAi), "models");
+        assert_eq!(
+            model_list_path(ProviderKind::Anthropic),
+            format!("models?limit={MAX_DISCOVERED_MODELS}")
+        );
+        assert_eq!(
+            model_list_path(ProviderKind::Gemini),
+            format!("v1beta/models?pageSize={MAX_DISCOVERED_MODELS}")
+        );
+        assert_eq!(
+            model_lookup_path(ProviderKind::OpenAi, "gpt-example").unwrap(),
+            "models/gpt-example"
+        );
+        assert_eq!(
+            model_lookup_path(ProviderKind::Anthropic, "claude-example").unwrap(),
+            "models/claude-example"
+        );
+        assert_eq!(
+            model_lookup_path(ProviderKind::Gemini, "gemini-example").unwrap(),
+            "v1beta/models/gemini-example"
+        );
+        assert!(model_lookup_path(ProviderKind::OpenAi, "../other").is_err());
+        assert!(model_lookup_path(ProviderKind::Gemini, "models/gemini-example").is_err());
     }
 
     #[test]
