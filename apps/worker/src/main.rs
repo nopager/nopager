@@ -117,6 +117,11 @@ async fn main() -> anyhow::Result<()> {
 async fn execute_job(database: &Database, job: &Job) -> anyhow::Result<()> {
     match job.job_type.as_str() {
         "production-action"
+            if job.payload_json.get("action").and_then(Value::as_str) == Some("rollback") =>
+        {
+            process_rollback_action(database, &job.payload_json).await
+        }
+        "production-action"
             if job.payload_json.get("action").and_then(Value::as_str) == Some("land-repair") =>
         {
             persist_verified_repair(database, &job.payload_json).await
@@ -142,6 +147,83 @@ async fn execute_job(database: &Database, job: &Job) -> anyhow::Result<()> {
         "post-deploy-watch" => watch_promoted_production(database, &job.payload_json).await,
         _ => legacy::execute_job_public(database, job).await,
     }
+}
+
+async fn process_rollback_action(database: &Database, payload: &Value) -> anyhow::Result<()> {
+    let incident_id = required_string(payload, "incidentId")?.parse()?;
+    let attempt_id: uuid::Uuid = required_string(payload, "attemptId")?.parse()?;
+    let source_repair_merged = source_repair_merged(payload);
+    let work = database.incident_work(incident_id).await?;
+    if work.protection_paused {
+        if work.state != IncidentState::Paused {
+            database
+                .transition_incident(IncidentTransition {
+                    project_id: work.project_id,
+                    incident_id,
+                    expected: work.state,
+                    next: IncidentState::Paused,
+                    actor: "worker".into(),
+                    message: "Protection paused before production mutation".into(),
+                    metadata: json!({}),
+                })
+                .await?;
+        }
+        return Ok(());
+    }
+    if work.state != IncidentState::RollingBack {
+        return Ok(());
+    }
+    let vercel_project_id = work
+        .vercel_project_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("Vercel project id is missing"))?;
+    let (known_good_id, _) = database
+        .latest_known_good_deployment(work.project_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no known-good production deployment exists"))?;
+    let vercel = legacy::vercel_client_public(database, &work).await?;
+    vercel.rollback(vercel_project_id, &known_good_id).await?;
+    database
+        .record_audit_event(
+            work.project_id,
+            Some(incident_id),
+            "worker",
+            "vercel.production.rollback",
+            &known_good_id,
+            "success",
+            &json!({ "sourceRepairMerged": source_repair_merged }),
+        )
+        .await?;
+    database
+        .transition_incident(IncidentTransition {
+            project_id: work.project_id,
+            incident_id,
+            expected: IncidentState::RollingBack,
+            next: IncidentState::RolledBack,
+            actor: "worker".into(),
+            message: "Production rolled back to the previous known-good deployment".into(),
+            metadata: json!({
+                "deploymentId": known_good_id,
+                "sourceRepairMerged": source_repair_merged
+            }),
+        })
+        .await?;
+    database
+        .enqueue_after(
+            JobType::Verify,
+            &format!("incident:{incident_id}:verify-rollback"),
+            Some(incident_id),
+            &json!({
+                "incidentId": incident_id,
+                "attemptId": attempt_id,
+                "phase": "rollback",
+                "sourceRepairMerged": source_repair_merged
+            }),
+            5,
+            5,
+        )
+        .await?;
+    Ok(())
 }
 
 async fn verify_promoted_production(database: &Database, payload: &Value) -> anyhow::Result<()> {
@@ -455,6 +537,57 @@ async fn persist_verified_repair(database: &Database, payload: &Value) -> anyhow
     Ok(())
 }
 
+async fn begin_durable_rollback(
+    database: &Database,
+    work: &nopager_db::IncidentWork,
+    incident_id: uuid::Uuid,
+    attempt_id: uuid::Uuid,
+    reason: &str,
+) -> anyhow::Result<()> {
+    if database
+        .latest_known_good_deployment(work.project_id)
+        .await?
+        .is_none()
+    {
+        database
+            .escalate_incident(
+                incident_id,
+                "durable production verification failed and no pre-incident known-good deployment exists",
+            )
+            .await?;
+        return Ok(());
+    }
+    database
+        .transition_incident(IncidentTransition {
+            project_id: work.project_id,
+            incident_id,
+            expected: IncidentState::VerifyingProduction,
+            next: IncidentState::RollingBack,
+            actor: "worker".into(),
+            message: "Durable production verification failed; restoring traffic before source remediation".into(),
+            metadata: json!({
+                "error": reason,
+                "sourceRepairMerged": true
+            }),
+        })
+        .await?;
+    database
+        .enqueue(
+            JobType::ProductionAction,
+            &format!("incident:{incident_id}:rollback"),
+            Some(incident_id),
+            &json!({
+                "incidentId": incident_id,
+                "attemptId": attempt_id,
+                "action": "rollback",
+                "sourceRepairMerged": true
+            }),
+            5,
+        )
+        .await?;
+    Ok(())
+}
+
 async fn verify_durable_production(database: &Database, payload: &Value) -> anyhow::Result<()> {
     let incident_id = required_string(payload, "incidentId")?.parse()?;
     let attempt_id = required_string(payload, "attemptId")?.parse()?;
@@ -469,12 +602,12 @@ async fn verify_durable_production(database: &Database, payload: &Value) -> anyh
     if let Err(error) =
         production::verify_current_production(&vercel, deployment_id, commit_sha).await
     {
-        legacy::begin_rollback_public(database, &work, incident_id, attempt_id, &error.to_string())
+        begin_durable_rollback(database, &work, incident_id, attempt_id, &error.to_string())
             .await?;
         return Ok(());
     }
     if let Err(error) = legacy::require_healthy_public(&work.health_check_url).await {
-        legacy::begin_rollback_public(database, &work, incident_id, attempt_id, &error.to_string())
+        begin_durable_rollback(database, &work, incident_id, attempt_id, &error.to_string())
             .await?;
         return Ok(());
     }
@@ -514,12 +647,12 @@ async fn watch_durable_production(database: &Database, payload: &Value) -> anyho
     if let Err(error) =
         production::verify_current_production(&vercel, deployment_id, commit_sha).await
     {
-        legacy::begin_rollback_public(database, &work, incident_id, attempt_id, &error.to_string())
+        begin_durable_rollback(database, &work, incident_id, attempt_id, &error.to_string())
             .await?;
         return Ok(());
     }
     if let Err(error) = legacy::require_healthy_public(&work.health_check_url).await {
-        legacy::begin_rollback_public(database, &work, incident_id, attempt_id, &error.to_string())
+        begin_durable_rollback(database, &work, incident_id, attempt_id, &error.to_string())
             .await?;
         return Ok(());
     }
@@ -587,8 +720,9 @@ async fn watch_durable_production(database: &Database, payload: &Value) -> anyho
 
 async fn verify_rolled_back_production(database: &Database, payload: &Value) -> anyhow::Result<()> {
     let incident_id = required_string(payload, "incidentId")?.parse()?;
-    let attempt_id = required_string(payload, "attemptId")?.parse()?;
+    let attempt_id: uuid::Uuid = required_string(payload, "attemptId")?.parse()?;
     let poll = payload.get("poll").and_then(Value::as_u64).unwrap_or(0);
+    let source_repair_merged = source_repair_merged(payload);
     let work = database.incident_work(incident_id).await?;
     if work.state != IncidentState::RolledBack {
         return Ok(());
@@ -622,7 +756,8 @@ async fn verify_rolled_back_production(database: &Database, payload: &Value) -> 
                         "incidentId": incident_id,
                         "attemptId": attempt_id,
                         "phase": "rollback",
-                        "poll": next
+                        "poll": next,
+                        "sourceRepairMerged": source_repair_merged
                     }),
                     5,
                     ROLLBACK_ACTIVATION_POLL_SECONDS,
@@ -654,9 +789,46 @@ async fn verify_rolled_back_production(database: &Database, payload: &Value) -> 
             "vercel.production.rollback_verified",
             &known_good_id,
             "success",
-            &json!({ "checks": ["deployment_current", "deployment_ready", "health"] }),
+            &json!({
+                "checks": ["deployment_current", "deployment_ready", "health"],
+                "sourceRepairMerged": source_repair_merged
+            }),
         )
         .await?;
+
+    if source_repair_merged {
+        database
+            .record_audit_event(
+                work.project_id,
+                Some(incident_id),
+                "worker",
+                "github.repair_pr.revert_required",
+                &attempt_id.to_string(),
+                "failure",
+                &json!({
+                    "reason": "production traffic recovered, but the merged repair remains on the protected source branch"
+                }),
+            )
+            .await?;
+        database
+            .transition_incident(IncidentTransition {
+                project_id: work.project_id,
+                incident_id,
+                expected: IncidentState::RolledBack,
+                next: IncidentState::Escalated,
+                actor: "worker".into(),
+                message: "Production recovered by rollback, but the merged repair still requires source reversion".into(),
+                metadata: json!({
+                    "deploymentId": known_good_id,
+                    "actionRequired": "revert_merged_repair",
+                    "sourceRepairMerged": true
+                }),
+            })
+            .await?;
+        legacy::enqueue_cleanup_public(database, incident_id, attempt_id).await?;
+        return Ok(());
+    }
+
     database
         .transition_incident(IncidentTransition {
             project_id: work.project_id,
@@ -672,6 +844,13 @@ async fn verify_rolled_back_production(database: &Database, payload: &Value) -> 
     Ok(())
 }
 
+fn source_repair_merged(value: &Value) -> bool {
+    value
+        .get("sourceRepairMerged")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 fn required_check(value: &Value) -> anyhow::Result<u64> {
     value
         .get("check")
@@ -684,4 +863,15 @@ fn required_string<'a>(value: &'a Value, key: &str) -> anyhow::Result<&'a str> {
         .get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("{key} is missing"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_repair_merged_defaults_false_and_round_trips_true() {
+        assert!(!source_repair_merged(&json!({})));
+        assert!(source_repair_merged(&json!({ "sourceRepairMerged": true })));
+    }
 }
