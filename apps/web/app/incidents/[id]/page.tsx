@@ -2,7 +2,11 @@ import Link from "next/link";
 import { ApproveButton, RejectButton } from "@/components/approve-button";
 import { Card, PageHeader, SectionTitle, StatusBadge } from "@/components/ui";
 import { api, type IncidentDetail } from "@/lib/api";
-import { projectIncidentState } from "@/lib/model";
+import {
+  projectIncidentState,
+  sourceRecoveryAction,
+  type SourceRecoveryAction,
+} from "@/lib/model";
 
 export default async function IncidentDetailPage({
   params,
@@ -37,7 +41,14 @@ export default async function IncidentDetailPage({
     ) ??
     incident.rootCauseSummary ??
     "No root-cause summary is available yet.";
-  const outcome = incidentOutcome(incident);
+  const sourceRecovery =
+    incident.status === "ESCALATED"
+      ? sourceRecoveryAction(incident.events)
+      : null;
+  const sourceRecoveryCopy = sourceRecovery
+    ? sourceRecoveryNotice(sourceRecovery)
+    : null;
+  const outcome = incidentOutcome(incident, sourceRecoveryCopy);
 
   return (
     <div className="page">
@@ -61,6 +72,29 @@ export default async function IncidentDetailPage({
             </p>
           </div>
           <ApproveButton incidentId={incident.id} />
+        </div>
+      )}
+      {sourceRecovery && sourceRecoveryCopy && (
+        <div className="notice amber">
+          <span>!</span>
+          <div>
+            <strong>{sourceRecoveryCopy.title}</strong>
+            <p>{sourceRecoveryCopy.message}</p>
+            {sourceRecovery.pullRequestUrl && sourceRecoveryCopy.linkLabel && (
+              <a
+                className="text-link"
+                href={sourceRecovery.pullRequestUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
+                {sourceRecoveryCopy.linkLabel}
+                {sourceRecovery.pullRequestNumber
+                  ? ` #${sourceRecovery.pullRequestNumber}`
+                  : ""}{" "}
+                →
+              </a>
+            )}
+          </div>
         </div>
       )}
       <Card>
@@ -170,7 +204,69 @@ export default async function IncidentDetailPage({
   );
 }
 
-function incidentOutcome(incident: IncidentDetail) {
+type SourceRecoveryCopy = {
+  title: string;
+  message: string;
+  nextStep: string;
+  linkLabel: string | null;
+};
+
+function sourceRecoveryNotice(
+  action: SourceRecoveryAction,
+): SourceRecoveryCopy {
+  switch (action.kind) {
+    case "review_source_revert":
+      return {
+        title: "Review the draft source-revert PR",
+        message:
+          "Production is back on the known-good deployment. NoPager created a draft PR to reverse the failed merged repair.",
+        nextStep:
+          "Review the draft and repository checks in GitHub. NoPager will not merge the source revert automatically.",
+        linkLabel: "Open draft source-revert PR",
+      };
+    case "verify_existing_source_revert":
+      return {
+        title: "Verify the existing source-revert candidate",
+        message:
+          "Production is recovered. NoPager found a PR carrying its recovery marker, but the marker alone is not trusted as proof of origin.",
+        nextStep:
+          "Open the candidate and verify that it reverts the failed repair before merging it.",
+        linkLabel: "Open source-revert candidate",
+      };
+    case "create_or_verify_source_revert":
+      return {
+        title: "Source recovery needs manual verification",
+        message:
+          "Production is recovered, but NoPager could not safely create or prove a source-revert PR.",
+        nextStep:
+          "Inspect the merged repair in GitHub and create or verify a revert before allowing the next production deployment.",
+        linkLabel: null,
+      };
+    case "revert_merged_repair":
+      return {
+        title: "Revert the merged repair",
+        message:
+          "Production is recovered, but the failed repair is still present on the protected source branch.",
+        nextStep:
+          "Use the repair PR below to prepare a source revert, then review repository checks before merging it.",
+        linkLabel: null,
+      };
+  }
+}
+
+function incidentOutcome(
+  incident: IncidentDetail,
+  sourceRecovery: SourceRecoveryCopy | null,
+) {
+  if (incident.status === "ESCALATED" && sourceRecovery) {
+    return {
+      label: "Source recovery needs review",
+      headline: "Production recovered, but source still needs attention.",
+      message: sourceRecovery.message,
+      nextStep: sourceRecovery.nextStep,
+    };
+  }
+
   switch (incident.status) {
     case "RESOLVED":
       return {
