@@ -44,6 +44,8 @@ pub(crate) async fn land_and_find_production(
     attempt: &RepairAttemptWork,
     vercel_project_id: &str,
 ) -> anyhow::Result<ProductionLanding> {
+    ensure_durable_branch_compatible(vercel, vercel_project_id, work).await?;
+
     let repair_branch = attempt
         .repair_branch
         .as_deref()
@@ -67,6 +69,38 @@ pub(crate) async fn land_and_find_production(
         ProductionDiscovery::Pending => Ok(ProductionLanding::Pending { merge_sha }),
         ProductionDiscovery::Ready(deployment) => Ok(ProductionLanding::Ready(deployment)),
     }
+}
+
+async fn ensure_durable_branch_compatible(
+    vercel: &VercelClient,
+    vercel_project_id: &str,
+    work: &IncidentWork,
+) -> anyhow::Result<()> {
+    let protected_branch = work
+        .github_metadata
+        .get("baseBranch")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("protected GitHub default branch metadata is missing"))?;
+    let project = vercel.get_project(vercel_project_id).await?;
+    validate_durable_branch(protected_branch, project.git_production_branch())
+}
+
+fn validate_durable_branch(
+    protected_branch: &str,
+    vercel_production_branch: Option<&str>,
+) -> anyhow::Result<()> {
+    let production_branch = vercel_production_branch.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Vercel project is not Git-linked; durable NoPager repair requires Vercel Git integration"
+        )
+    })?;
+    if production_branch != protected_branch {
+        anyhow::bail!(
+            "Vercel Production Branch '{production_branch}' does not match protected GitHub default branch '{protected_branch}'; refusing to merge a repair that would not automatically become production"
+        );
+    }
+    Ok(())
 }
 
 async fn find_current_production_for_commit(
@@ -196,6 +230,14 @@ mod tests {
             live,
             meta: json!({ "githubCommitSha": sha }),
         }
+    }
+
+    #[test]
+    fn durable_source_merge_requires_matching_git_production_branch() {
+        assert!(validate_durable_branch("main", Some("main")).is_ok());
+        assert!(validate_durable_branch("release", Some("release")).is_ok());
+        assert!(validate_durable_branch("main", Some("production")).is_err());
+        assert!(validate_durable_branch("main", None).is_err());
     }
 
     #[test]

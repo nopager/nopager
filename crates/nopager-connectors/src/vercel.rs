@@ -47,9 +47,27 @@ pub struct DeploymentList {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProjectDetails {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub link: Option<ProjectLink>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectLink {
+    #[serde(default)]
+    pub production_branch: Option<String>,
+}
+
+impl ProjectDetails {
+    pub fn git_production_branch(&self) -> Option<&str> {
+        self.link
+            .as_ref()
+            .map(|link| link.production_branch.as_deref().unwrap_or("main"))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -464,6 +482,32 @@ mod tests {
         let client = VercelClient::new(SecretString::from("token".to_owned()), Some("   ".into()))
             .expect("valid client");
         assert!(client.team_id.is_none());
+    }
+
+    #[test]
+    fn project_git_production_branch_uses_explicit_value_or_main_default() {
+        let explicit: ProjectDetails = serde_json::from_value(json!({
+            "id": "prj_1",
+            "name": "demo",
+            "link": { "productionBranch": "release" }
+        }))
+        .unwrap();
+        assert_eq!(explicit.git_production_branch(), Some("release"));
+
+        let default_main: ProjectDetails = serde_json::from_value(json!({
+            "id": "prj_1",
+            "name": "demo",
+            "link": {}
+        }))
+        .unwrap();
+        assert_eq!(default_main.git_production_branch(), Some("main"));
+
+        let no_git_link: ProjectDetails = serde_json::from_value(json!({
+            "id": "prj_1",
+            "name": "demo"
+        }))
+        .unwrap();
+        assert_eq!(no_git_link.git_production_branch(), None);
     }
 
     #[test]
