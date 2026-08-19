@@ -7,6 +7,7 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 mod production;
+mod source_recovery;
 
 // Keep the already-validated incident pipeline byte-for-byte intact while the
 // production durability boundary is separated into a small orchestration layer.
@@ -24,6 +25,35 @@ mod legacy {
         work: &nopager_db::IncidentWork,
     ) -> anyhow::Result<nopager_connectors::github::GitHubClient> {
         github_client(database, work).await
+    }
+
+    pub(super) async fn github_auth_public(
+        database: &nopager_db::Database,
+        work: &nopager_db::IncidentWork,
+    ) -> anyhow::Result<nopager_connectors::github::GitHubAppAuth> {
+        if let Ok(credentials) = integration_credentials(database, work.project_id, "github").await
+        {
+            let app_id = required_u64(&credentials, "appId")?;
+            let installation_id = required_u64(&credentials, "installationId")?;
+            let private_key = required_string(&credentials, "privateKey")?.replace("\\n", "\n");
+            return Ok(nopager_connectors::github::GitHubAppAuth::new(
+                app_id,
+                installation_id,
+                secrecy::SecretString::from(private_key),
+            )?);
+        }
+        let app_id = std::env::var("GITHUB_APP_ID")?.parse()?;
+        let installation_id = env_or_metadata_u64(
+            "GITHUB_INSTALLATION_ID",
+            &work.github_metadata,
+            "installationId",
+        )?;
+        let private_key = std::env::var("GITHUB_APP_PRIVATE_KEY")?.replace("\\n", "\n");
+        Ok(nopager_connectors::github::GitHubAppAuth::new(
+            app_id,
+            installation_id,
+            secrecy::SecretString::from(private_key),
+        )?)
     }
 
     pub(super) async fn vercel_client_public(
@@ -899,34 +929,18 @@ async fn verify_rolled_back_production(database: &Database, payload: &Value) -> 
         .await?;
 
     if source_repair_merged {
-        database
-            .record_audit_event(
-                work.project_id,
-                Some(incident_id),
-                "worker",
-                "github.repair_pr.revert_required",
-                &attempt_id.to_string(),
-                "failure",
-                &json!({
-                    "reason": "production traffic recovered, but the merged repair remains on the protected source branch"
-                }),
-            )
-            .await?;
-        database
-            .transition_incident(IncidentTransition {
-                project_id: work.project_id,
-                incident_id,
-                expected: IncidentState::RolledBack,
-                next: IncidentState::Escalated,
-                actor: "worker".into(),
-                message: "Production recovered by rollback, but the merged repair still requires source reversion".into(),
-                metadata: json!({
-                    "deploymentId": known_good_id,
-                    "actionRequired": "revert_merged_repair",
-                    "sourceRepairMerged": true
-                }),
-            })
-            .await?;
+        let attempt = database.repair_attempt(attempt_id).await?;
+        let github_auth = legacy::github_auth_public(database, &work).await;
+        source_recovery::prepare_draft_source_revert(
+            database,
+            &work,
+            incident_id,
+            attempt_id,
+            &attempt,
+            &known_good_id,
+            github_auth,
+        )
+        .await?;
         legacy::enqueue_cleanup_public(database, incident_id, attempt_id).await?;
         return Ok(());
     }
