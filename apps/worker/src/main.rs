@@ -153,6 +153,9 @@ async fn process_rollback_action(database: &Database, payload: &Value) -> anyhow
     let incident_id = required_string(payload, "incidentId")?.parse()?;
     let attempt_id: uuid::Uuid = required_string(payload, "attemptId")?.parse()?;
     let source_repair_merged = source_repair_merged(payload);
+    let expected_production_id = payload
+        .get("expectedProductionDeploymentId")
+        .and_then(Value::as_str);
     let work = database.incident_work(incident_id).await?;
     if work.protection_paused {
         if work.state != IncidentState::Paused {
@@ -181,7 +184,72 @@ async fn process_rollback_action(database: &Database, payload: &Value) -> anyhow
         .latest_known_good_deployment(work.project_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("no known-good production deployment exists"))?;
+    let attempt = database.repair_attempt(attempt_id).await?;
+    let repair_commit_sha = attempt.repair_commit_sha.as_deref();
     let vercel = legacy::vercel_client_public(database, &work).await?;
+    let project = vercel.get_project(vercel_project_id).await?;
+    let Some(current) = project.current_production_target() else {
+        database
+            .record_audit_event(
+                work.project_id,
+                Some(incident_id),
+                "worker",
+                "vercel.production.rollback_blocked",
+                vercel_project_id,
+                "failure",
+                &json!({
+                    "reason": "current_production_identity_unproven",
+                    "knownGoodDeploymentId": known_good_id,
+                    "expectedProductionDeploymentId": expected_production_id,
+                    "sourceRepairMerged": source_repair_merged
+                }),
+            )
+            .await?;
+        database
+            .escalate_incident(
+                incident_id,
+                "production changed or is mid-rollout; refusing rollback because the current Vercel Production target cannot be proven",
+            )
+            .await?;
+        return Ok(());
+    };
+    let current_commit_sha = current.meta.get("githubCommitSha").and_then(Value::as_str);
+    if !rollback_target_is_controlled(
+        &current.id,
+        current_commit_sha,
+        &known_good_id,
+        expected_production_id,
+        repair_commit_sha,
+        source_repair_merged,
+    ) {
+        database
+            .record_audit_event(
+                work.project_id,
+                Some(incident_id),
+                "worker",
+                "vercel.production.rollback_blocked",
+                &current.id,
+                "failure",
+                &json!({
+                    "reason": "production_target_drifted",
+                    "currentDeploymentId": current.id,
+                    "currentCommitSha": current_commit_sha,
+                    "knownGoodDeploymentId": known_good_id,
+                    "expectedProductionDeploymentId": expected_production_id,
+                    "repairCommitSha": repair_commit_sha,
+                    "sourceRepairMerged": source_repair_merged
+                }),
+            )
+            .await?;
+        database
+            .escalate_incident(
+                incident_id,
+                "production was replaced by a deployment outside the current NoPager repair; refusing to overwrite external production changes with an automatic rollback",
+            )
+            .await?;
+        return Ok(());
+    }
+
     vercel.rollback(vercel_project_id, &known_good_id).await?;
     database
         .record_audit_event(
@@ -191,7 +259,10 @@ async fn process_rollback_action(database: &Database, payload: &Value) -> anyhow
             "vercel.production.rollback",
             &known_good_id,
             "success",
-            &json!({ "sourceRepairMerged": source_repair_merged }),
+            &json!({
+                "sourceRepairMerged": source_repair_merged,
+                "replacedDeploymentId": current.id
+            }),
         )
         .await?;
     database
@@ -542,6 +613,7 @@ async fn begin_durable_rollback(
     work: &nopager_db::IncidentWork,
     incident_id: uuid::Uuid,
     attempt_id: uuid::Uuid,
+    expected_production_id: &str,
     reason: &str,
 ) -> anyhow::Result<()> {
     if database
@@ -567,7 +639,8 @@ async fn begin_durable_rollback(
             message: "Durable production verification failed; restoring traffic before source remediation".into(),
             metadata: json!({
                 "error": reason,
-                "sourceRepairMerged": true
+                "sourceRepairMerged": true,
+                "expectedProductionDeploymentId": expected_production_id
             }),
         })
         .await?;
@@ -580,7 +653,8 @@ async fn begin_durable_rollback(
                 "incidentId": incident_id,
                 "attemptId": attempt_id,
                 "action": "rollback",
-                "sourceRepairMerged": true
+                "sourceRepairMerged": true,
+                "expectedProductionDeploymentId": expected_production_id
             }),
             5,
         )
@@ -602,13 +676,27 @@ async fn verify_durable_production(database: &Database, payload: &Value) -> anyh
     if let Err(error) =
         production::verify_current_production(&vercel, deployment_id, commit_sha).await
     {
-        begin_durable_rollback(database, &work, incident_id, attempt_id, &error.to_string())
-            .await?;
+        begin_durable_rollback(
+            database,
+            &work,
+            incident_id,
+            attempt_id,
+            deployment_id,
+            &error.to_string(),
+        )
+        .await?;
         return Ok(());
     }
     if let Err(error) = legacy::require_healthy_public(&work.health_check_url).await {
-        begin_durable_rollback(database, &work, incident_id, attempt_id, &error.to_string())
-            .await?;
+        begin_durable_rollback(
+            database,
+            &work,
+            incident_id,
+            attempt_id,
+            deployment_id,
+            &error.to_string(),
+        )
+        .await?;
         return Ok(());
     }
 
@@ -647,13 +735,27 @@ async fn watch_durable_production(database: &Database, payload: &Value) -> anyho
     if let Err(error) =
         production::verify_current_production(&vercel, deployment_id, commit_sha).await
     {
-        begin_durable_rollback(database, &work, incident_id, attempt_id, &error.to_string())
-            .await?;
+        begin_durable_rollback(
+            database,
+            &work,
+            incident_id,
+            attempt_id,
+            deployment_id,
+            &error.to_string(),
+        )
+        .await?;
         return Ok(());
     }
     if let Err(error) = legacy::require_healthy_public(&work.health_check_url).await {
-        begin_durable_rollback(database, &work, incident_id, attempt_id, &error.to_string())
-            .await?;
+        begin_durable_rollback(
+            database,
+            &work,
+            incident_id,
+            attempt_id,
+            deployment_id,
+            &error.to_string(),
+        )
+        .await?;
         return Ok(());
     }
 
@@ -844,6 +946,21 @@ async fn verify_rolled_back_production(database: &Database, payload: &Value) -> 
     Ok(())
 }
 
+fn rollback_target_is_controlled(
+    current_deployment_id: &str,
+    current_commit_sha: Option<&str>,
+    known_good_id: &str,
+    expected_production_id: Option<&str>,
+    repair_commit_sha: Option<&str>,
+    source_repair_merged: bool,
+) -> bool {
+    current_deployment_id == known_good_id
+        || expected_production_id == Some(current_deployment_id)
+        || (!source_repair_merged
+            && repair_commit_sha.is_some()
+            && current_commit_sha == repair_commit_sha)
+}
+
 fn source_repair_merged(value: &Value) -> bool {
     value
         .get("sourceRepairMerged")
@@ -868,6 +985,50 @@ fn required_string<'a>(value: &'a Value, key: &str) -> anyhow::Result<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rollback_ownership_allows_only_baseline_or_current_repair() {
+        assert!(rollback_target_is_controlled(
+            "dpl_baseline",
+            Some("baseline-sha"),
+            "dpl_baseline",
+            None,
+            Some("repair-sha"),
+            false,
+        ));
+        assert!(rollback_target_is_controlled(
+            "dpl_promoted",
+            Some("repair-sha"),
+            "dpl_baseline",
+            None,
+            Some("repair-sha"),
+            false,
+        ));
+        assert!(rollback_target_is_controlled(
+            "dpl_durable",
+            Some("merge-sha"),
+            "dpl_baseline",
+            Some("dpl_durable"),
+            Some("repair-sha"),
+            true,
+        ));
+        assert!(!rollback_target_is_controlled(
+            "dpl_external",
+            Some("external-sha"),
+            "dpl_baseline",
+            Some("dpl_durable"),
+            Some("repair-sha"),
+            true,
+        ));
+        assert!(!rollback_target_is_controlled(
+            "dpl_external",
+            None,
+            "dpl_baseline",
+            None,
+            Some("repair-sha"),
+            false,
+        ));
+    }
 
     #[test]
     fn source_repair_merged_defaults_false_and_round_trips_true() {
