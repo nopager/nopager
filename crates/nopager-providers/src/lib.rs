@@ -8,12 +8,12 @@ use url::Url;
 mod core;
 mod setup_validation;
 
+pub(crate) use core::validate_repair_path;
 pub use core::{
     CommitContext, ControlledCommand, DiagnosisInput, DiagnosisResult, Evidence,
     OutputValidationError, RepairInput, RepairProposal, RiskLevel, SourceFile,
     VERIFIED_GITHUB_DIFF_SOURCE,
 };
-pub(crate) use core::validate_repair_path;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

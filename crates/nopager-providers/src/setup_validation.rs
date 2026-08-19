@@ -141,13 +141,16 @@ impl SetupProvider {
     }
 
     async fn capability_probe(&self) -> Result<(), ProviderError> {
-        let result = self.run_capability_probe().await.map_err(|error| match error {
-            ProviderError::Authentication => ProviderError::Authentication,
-            other => ProviderError::CapabilityProbeFailed {
-                model: self.model.clone(),
-                reason: other.to_string(),
-            },
-        })?;
+        let result = self
+            .run_capability_probe()
+            .await
+            .map_err(|error| match error {
+                ProviderError::Authentication => ProviderError::Authentication,
+                other => ProviderError::CapabilityProbeFailed {
+                    model: self.model.clone(),
+                    reason: other.to_string(),
+                },
+            })?;
         if result.ok {
             Ok(())
         } else {
@@ -160,7 +163,8 @@ impl SetupProvider {
 
     async fn run_capability_probe(&self) -> Result<CapabilityProbe, ProviderError> {
         let schema = capability_probe_schema();
-        let prompt = "Return the requested capability_probe for this input:\n{\"probe\":\"nopager_setup\"}";
+        let prompt =
+            "Return the requested capability_probe for this input:\n{\"probe\":\"nopager_setup\"}";
         let body = self.structured_request_body(
             "capability_probe",
             schema,
@@ -320,41 +324,47 @@ async fn decode_json(response: reqwest::Response) -> Result<Value, ProviderError
         return Err(ProviderError::Authentication);
     }
     if !status.is_success() {
-        return Err(ProviderError::Request(format!("provider returned {status}")));
+        return Err(ProviderError::Request(format!(
+            "provider returned {status}"
+        )));
     }
     response.json().await.map_err(|_| ProviderError::Decode)
 }
 
 fn extract_text(kind: ProviderKind, response: &Value) -> Result<&str, ProviderError> {
     match kind {
-        ProviderKind::OpenAi => response
-            .get("output")
-            .and_then(Value::as_array)
-            .and_then(|items| {
-                items
-                    .iter()
-                    .flat_map(|item| {
-                        item.get("content")
-                            .and_then(Value::as_array)
-                            .into_iter()
-                            .flatten()
-                    })
-                    .find_map(|content| {
-                        (content.get("type").and_then(Value::as_str) == Some("output_text"))
+        ProviderKind::OpenAi => {
+            response
+                .get("output")
+                .and_then(Value::as_array)
+                .and_then(|items| {
+                    items
+                        .iter()
+                        .flat_map(|item| {
+                            item.get("content")
+                                .and_then(Value::as_array)
+                                .into_iter()
+                                .flatten()
+                        })
+                        .find_map(|content| {
+                            (content.get("type").and_then(Value::as_str) == Some("output_text"))
+                                .then(|| content.get("text").and_then(Value::as_str))
+                                .flatten()
+                        })
+                })
+        }
+        ProviderKind::Anthropic => {
+            response
+                .get("content")
+                .and_then(Value::as_array)
+                .and_then(|items| {
+                    items.iter().find_map(|content| {
+                        (content.get("type").and_then(Value::as_str) == Some("text"))
                             .then(|| content.get("text").and_then(Value::as_str))
                             .flatten()
                     })
-            }),
-        ProviderKind::Anthropic => response
-            .get("content")
-            .and_then(Value::as_array)
-            .and_then(|items| {
-                items.iter().find_map(|content| {
-                    (content.get("type").and_then(Value::as_str) == Some("text"))
-                        .then(|| content.get("text").and_then(Value::as_str))
-                        .flatten()
                 })
-            }),
+        }
         ProviderKind::Gemini => response
             .pointer("/candidates/0/content/parts/0/text")
             .and_then(Value::as_str),
@@ -389,15 +399,24 @@ mod tests {
         });
         assert_eq!(
             parse_available_models(ProviderKind::OpenAi, &openai).unwrap(),
-            vec![AvailableModel { id: "gpt-example".into(), display_name: "gpt-example".into() }]
+            vec![AvailableModel {
+                id: "gpt-example".into(),
+                display_name: "gpt-example".into()
+            }]
         );
         assert_eq!(
             parse_available_models(ProviderKind::Anthropic, &anthropic).unwrap(),
-            vec![AvailableModel { id: "claude-example".into(), display_name: "Claude Example".into() }]
+            vec![AvailableModel {
+                id: "claude-example".into(),
+                display_name: "Claude Example".into()
+            }]
         );
         assert_eq!(
             parse_available_models(ProviderKind::Gemini, &gemini).unwrap(),
-            vec![AvailableModel { id: "gemini-text".into(), display_name: "Gemini Text".into() }]
+            vec![AvailableModel {
+                id: "gemini-text".into(),
+                display_name: "Gemini Text".into()
+            }]
         );
     }
 
@@ -424,7 +443,11 @@ mod tests {
     fn capability_probe_uses_runtime_structured_output_shape_with_small_budget() {
         let schema = capability_probe_schema();
         let key = SecretString::from("test-key".to_owned());
-        for kind in [ProviderKind::OpenAi, ProviderKind::Anthropic, ProviderKind::Gemini] {
+        for kind in [
+            ProviderKind::OpenAi,
+            ProviderKind::Anthropic,
+            ProviderKind::Gemini,
+        ] {
             let provider = SetupProvider::new(
                 kind,
                 key.clone(),
@@ -442,7 +465,10 @@ mod tests {
             match kind {
                 ProviderKind::OpenAi => {
                     assert_eq!(body["model"], "test-model");
-                    assert_eq!(body["max_output_tokens"], CAPABILITY_PROBE_MAX_OUTPUT_TOKENS);
+                    assert_eq!(
+                        body["max_output_tokens"],
+                        CAPABILITY_PROBE_MAX_OUTPUT_TOKENS
+                    );
                     assert_eq!(body["text"]["format"]["type"], "json_schema");
                     assert_eq!(body["text"]["format"]["strict"], true);
                 }
@@ -453,8 +479,14 @@ mod tests {
                 }
                 ProviderKind::Gemini => {
                     assert!(body.get("model").is_none());
-                    assert_eq!(body["generationConfig"]["maxOutputTokens"], CAPABILITY_PROBE_MAX_OUTPUT_TOKENS);
-                    assert_eq!(body["generationConfig"]["responseMimeType"], "application/json");
+                    assert_eq!(
+                        body["generationConfig"]["maxOutputTokens"],
+                        CAPABILITY_PROBE_MAX_OUTPUT_TOKENS
+                    );
+                    assert_eq!(
+                        body["generationConfig"]["responseMimeType"],
+                        "application/json"
+                    );
                     assert_eq!(body["generationConfig"]["responseJsonSchema"], schema);
                 }
             }
