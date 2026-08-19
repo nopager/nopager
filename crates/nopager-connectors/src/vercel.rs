@@ -243,8 +243,27 @@ impl VercelClient {
         project_id: &str,
         deployment_id: &str,
     ) -> Result<(), ConnectorError> {
-        self.production_action("v10", "promote", project_id, deployment_id)
-            .await
+        validate_id(project_id)?;
+        validate_id(deployment_id)?;
+        let project = self.get_project(project_id).await?;
+        let response: Value = decode(
+            self.request(Method::POST, "v13/deployments")?
+                .json(&promotion_payload(&project.name, deployment_id))
+                .send()
+                .await?,
+        )
+        .await?;
+        if response
+            .get("id")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            return Err(ConnectorError::Api {
+                status: reqwest::StatusCode::BAD_GATEWAY,
+                message: "Vercel production rebuild response omitted deployment id".into(),
+            });
+        }
+        Ok(())
     }
 
     pub async fn rollback(
@@ -294,6 +313,15 @@ fn preview_payload(project_name: &str, source: &GitSource) -> Value {
         "name": project_name,
         "target": "preview",
         "gitSource": { "type": source.kind, "repoId": source.repo_id, "ref": source.ref_name, "sha": source.sha }
+    })
+}
+
+fn promotion_payload(project_name: &str, deployment_id: &str) -> Value {
+    json!({
+        "deploymentId": deployment_id,
+        "name": project_name,
+        "target": "production",
+        "meta": { "action": "promote" }
     })
 }
 
@@ -479,6 +507,15 @@ mod tests {
         let payload = preview_payload("demo", &source);
         assert_eq!(payload["target"], "preview");
         assert_eq!(payload["gitSource"]["ref"], source.ref_name);
+    }
+
+    #[test]
+    fn promotion_rebuilds_preview_with_production_environment() {
+        let payload = promotion_payload("demo", "dpl_preview");
+        assert_eq!(payload["deploymentId"], "dpl_preview");
+        assert_eq!(payload["name"], "demo");
+        assert_eq!(payload["target"], "production");
+        assert_eq!(payload["meta"]["action"], "promote");
     }
 
     #[test]
