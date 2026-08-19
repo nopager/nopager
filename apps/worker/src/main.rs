@@ -170,45 +170,40 @@ async fn verify_promoted_production(database: &Database, payload: &Value) -> any
         return Ok(());
     }
 
-    let production_deployment = match production::find_promoted_production(
-        &vercel,
-        vercel_project_id,
-        commit_sha,
-    )
-    .await
-    {
-        Ok(production::ProductionDiscovery::Pending) => {
-            let next = poll + 1;
-            database
-                .enqueue_after(
-                    JobType::Verify,
-                    &format!("incident:{incident_id}:verify-production:{next}"),
-                    Some(incident_id),
-                    &json!({
-                        "incidentId": incident_id,
-                        "attemptId": attempt_id,
-                        "phase": "production",
-                        "poll": next
-                    }),
-                    3,
-                    PROMOTION_ACTIVATION_POLL_SECONDS,
+    let production_deployment =
+        match production::find_promoted_production(&vercel, vercel_project_id, commit_sha).await {
+            Ok(production::ProductionDiscovery::Pending) => {
+                let next = poll + 1;
+                database
+                    .enqueue_after(
+                        JobType::Verify,
+                        &format!("incident:{incident_id}:verify-production:{next}"),
+                        Some(incident_id),
+                        &json!({
+                            "incidentId": incident_id,
+                            "attemptId": attempt_id,
+                            "phase": "production",
+                            "poll": next
+                        }),
+                        3,
+                        PROMOTION_ACTIVATION_POLL_SECONDS,
+                    )
+                    .await?;
+                return Ok(());
+            }
+            Ok(production::ProductionDiscovery::Ready(deployment)) => deployment,
+            Err(error) => {
+                legacy::begin_rollback_public(
+                    database,
+                    &work,
+                    incident_id,
+                    attempt_id,
+                    &error.to_string(),
                 )
                 .await?;
-            return Ok(());
-        }
-        Ok(production::ProductionDiscovery::Ready(deployment)) => deployment,
-        Err(error) => {
-            legacy::begin_rollback_public(
-                database,
-                &work,
-                incident_id,
-                attempt_id,
-                &error.to_string(),
-            )
-            .await?;
-            return Ok(());
-        }
-    };
+                return Ok(());
+            }
+        };
 
     database
         .save_deployment(
