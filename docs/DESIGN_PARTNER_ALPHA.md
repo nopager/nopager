@@ -26,11 +26,11 @@ Do not add Team, multi-service coordination, RBAC, SSO, billing, AWS, Azure, GCP
 A release candidate is ready for a design partner only when the following end-to-end path works against a real GitHub repository and real Vercel project:
 
 1. Start NoPager with `sh scripts/quickstart.sh` and confirm the script reports the stack ready.
-2. Open `/setup` and create the local administrator.
-3. Connect GitHub. NoPager must discover the repository ID and default branch from the selected installation/repository.
+2. Open `/setup` and create the local administrator. For a production-like run, use the final public HTTPS NoPager console origin before starting automatic GitHub App registration.
+3. Connect GitHub. The recommended path must complete GitHub App Manifest creation/installation without requiring the operator to manually copy an App private key. NoPager must then verify the exact repository and discover its repository ID and default branch. The documented manual GitHub App path remains a fallback.
 4. Connect Vercel. Team ID is optional for personal projects; the project lookup must succeed.
-5. Configure and test a BYOK model provider with an explicit model ID.
-6. Configure the public HTTPS production URL and health URL and pass the live health test.
+5. Configure a BYOK model provider, load the models available to that account, select an exact model ID, and pass NoPager's bounded structured-output capability probe. Manual exact model entry remains a fallback when discovery is unavailable.
+6. Configure the public HTTPS production URL, use safe health-endpoint discovery or enter the health URL manually, and pass the live health test.
 7. Keep Safe Mode enabled and click **Protect App**.
 8. Run each of the supported production-failure scenarios below on the dogfood app.
 9. NoPager opens exactly one deduplicated incident for each injected failure.
@@ -106,11 +106,13 @@ Pass criteria:
 
 ## Setup usability gate
 
-The product target is a first protected app within ten minutes for a technically competent SaaS founder who already has the required GitHub App/Vercel credentials.
+The product target is a first protected app within ten minutes for a technically competent SaaS founder who already has access to the target GitHub repository, a Vercel access token for the target project, and a supported model-provider API key. A pre-created GitHub App should not be required on the recommended path.
 
 Measure it with a fresh machine/profile. Do not mark the gate complete by developer familiarity alone.
 
-Current Alpha caveat: GitHub App ID, Installation ID, repository owner/name, private key, and webhook secret are still entered manually. Vercel project ID/name and token are entered manually, with Team ID optional for personal projects and the Vercel webhook secret optional because polling remains active. Repository ID/default branch and canonical Vercel project metadata are discovered by NoPager rather than typed manually. This manual credential flow is acceptable for the first design partners, but guided OAuth/App installation should replace it after the core demand is proven.
+Current Alpha setup behavior: the recommended GitHub path uses GitHub App Manifest registration to generate the least-privilege App credentials and then guides the operator through repository-scoped installation. Production-like automatic setup must be started from the final public HTTPS NoPager console origin so the generated workflow-run webhook is deliverable; manual App ID/installation ID/private-key entry remains a fallback for organizations that disallow manifest registration. Vercel project ID/name and access token are entered manually, with Team ID optional for personal projects and the Vercel webhook secret optional because polling remains active. The model-provider API key is BYOK/manual, while the wizard can discover the models available to that provider account and validates the selected model. Repository ID/default branch, canonical Vercel project metadata, and common health endpoints are discovered by NoPager rather than typed manually.
+
+The remaining setup work after Alpha should focus on reducing Vercel credential friction and proving the ten-minute target with fresh external users, not reintroducing a central credential broker.
 
 ## Design partner operating rule
 

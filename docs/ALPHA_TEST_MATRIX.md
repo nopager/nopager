@@ -22,5 +22,10 @@ Run this matrix before handing NoPager to an external design partner.
 - **A18 — Rollback verification succeeds:** Incident records rollback outcome and stops unsafe repair.
 - **A19 — Rollback verification fails:** Incident escalates; no further production mutation.
 - **A20 — External design-partner run:** No owner intervention before the Safe Mode approval boundary except initial setup.
+- **A21 — Automatic GitHub App onboarding:** From the final public HTTPS NoPager console origin, the Manifest flow creates the private least-privilege App, the operator installs it only on the intended repository, the callback returns an installation ID, and **Verify GitHub** proves access to that exact repository. The workflow-run webhook is active and a real signed event reaches NoPager.
+- **A22 — Manual GitHub fallback:** An organization that disallows Manifest registration can enter an App ID, installation ID, private-key PEM, and webhook secret manually and pass the same exact-repository verification.
+- **A23 — Provider model discovery:** For each supported provider family, a real BYOK account can load its available models; selecting an unavailable exact model fails closed with an actionable error.
+- **A24 — Provider capability probe:** A selected supported model passes NoPager's bounded structured-output capability probe; a model/account combination that cannot satisfy the required API shape fails setup without protecting the app.
+- **A25 — Health endpoint discovery:** For a public HTTPS production origin, safe discovery selects a standard endpoint only when it returns HTTP 200; unsafe/private destinations remain rejected and manual health-URL entry still works.
 
-For A2–A4 use `examples/demo-next-app`. For A5–A19 use controlled dogfood fixtures or integration tests; do not use a real customer production system for destructive testing.
+For A2–A4 use `examples/demo-next-app`. For A5–A19 use controlled dogfood fixtures or integration tests; do not use a real customer production system for destructive testing. Run A21 and A23–A25 against disposable but real external accounts/projects before the first design partner so current provider behavior is proven rather than inferred from mocks alone.
