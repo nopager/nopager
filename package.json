@@ -10,7 +10,7 @@
     "test": "turbo run test && cargo test --workspace",
     "typecheck": "turbo run typecheck",
     "format": "prettier --write . && cargo fmt --all",
-    "format:check": "prettier --write \"apps/web/app/incidents/[id]/page.tsx\" apps/web/lib/model.ts && git diff -- \"apps/web/app/incidents/[id]/page.tsx\" apps/web/lib/model.ts && false",
+    "format:check": "prettier --check . && cargo fmt --all -- --check",
     "rust:build": "cargo build --workspace",
     "rust:test": "cargo test --workspace"
   },
