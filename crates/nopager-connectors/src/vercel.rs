@@ -25,6 +25,7 @@ pub struct VercelClient {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Deployment {
+    #[serde(alias = "uid")]
     pub id: String,
     pub url: String,
     #[serde(default)]
@@ -37,6 +38,8 @@ pub struct Deployment {
     pub target: Option<String>,
     #[serde(default)]
     pub live: Option<bool>,
+    #[serde(default)]
+    pub project_id: Option<String>,
     #[serde(default)]
     pub meta: serde_json::Value,
 }
@@ -53,6 +56,23 @@ pub struct ProjectDetails {
     pub name: String,
     #[serde(default)]
     pub link: Option<ProjectLink>,
+    #[serde(default)]
+    pub targets: BTreeMap<String, Option<ProjectTarget>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectTarget {
+    pub id: String,
+    pub url: String,
+    #[serde(default)]
+    pub ready_state: Option<String>,
+    #[serde(default)]
+    pub ready_substate: Option<String>,
+    #[serde(default)]
+    pub target: Option<String>,
+    #[serde(default)]
+    pub meta: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -84,6 +104,16 @@ impl ProjectDetails {
             .production_branch
             .as_deref()
             .filter(|value| !value.trim().is_empty())
+    }
+
+    pub fn current_production_target(&self) -> Option<&ProjectTarget> {
+        let target = self.targets.get("production")?.as_ref()?;
+        if target.ready_state.as_deref() != Some("READY")
+            || target.ready_substate.as_deref() != Some("PROMOTED")
+        {
+            return None;
+        }
+        Some(target)
     }
 }
 
@@ -175,13 +205,28 @@ impl VercelClient {
 
     pub async fn get_deployment(&self, id_or_url: &str) -> Result<Deployment, ConnectorError> {
         validate_id(id_or_url)?;
-        let deployment = decode(
+        let deployment: Deployment = decode(
             self.request(Method::GET, &format!("v13/deployments/{id_or_url}"))?
                 .send()
                 .await?,
         )
         .await?;
-        Ok(normalize_current_target(deployment))
+        if deployment.target.as_deref() != Some("production") {
+            return Ok(deployment);
+        }
+        let project_id = deployment.project_id.as_deref().ok_or_else(|| {
+            ConnectorError::InvalidConfiguration(
+                "Vercel production deployment omitted projectId; current Production identity cannot be proven"
+                    .into(),
+            )
+        })?;
+        let project = self.get_project(project_id).await?;
+        Ok(normalize_current_target(
+            deployment,
+            project
+                .current_production_target()
+                .map(|target| target.id.as_str()),
+        ))
     }
 
     pub async fn list_deployments(
@@ -189,7 +234,15 @@ impl VercelClient {
         project_id: &str,
         limit: u8,
     ) -> Result<Vec<Deployment>, ConnectorError> {
-        self.list_deployments_since(project_id, limit, None).await
+        let deployments = self.list_deployments_since(project_id, limit, None).await?;
+        let project = self.get_project(project_id).await?;
+        let current_production_id = project
+            .current_production_target()
+            .map(|target| target.id.as_str());
+        Ok(deployments
+            .into_iter()
+            .map(|deployment| normalize_current_target(deployment, current_production_id))
+            .collect())
     }
 
     pub async fn list_deployments_since(
@@ -440,13 +493,13 @@ fn preview_secrets_explicitly_allowed() -> bool {
         })
 }
 
-fn normalize_current_target(mut deployment: Deployment) -> Deployment {
-    // `target=production` identifies the deployment environment. It does not mean
-    // the deployment is still the one serving production traffic. Vercel's v13
-    // deployment response exposes `live` for that distinction. Keeping a stale
-    // production target here would make rollback incorrectly skip a known-good
-    // deployment that is no longer live.
-    if deployment.target.as_deref() == Some("production") && deployment.live == Some(false) {
+fn normalize_current_target(
+    mut deployment: Deployment,
+    current_production_id: Option<&str>,
+) -> Deployment {
+    if deployment.target.as_deref() == Some("production")
+        && current_production_id != Some(deployment.id.as_str())
+    {
         deployment.target = None;
     }
     deployment
@@ -465,17 +518,36 @@ fn validate_id(value: &str) -> Result<(), ConnectorError> {
 mod tests {
     use super::*;
 
-    fn deployment(target: Option<&str>, live: Option<bool>) -> Deployment {
+    fn deployment(id: &str, target: Option<&str>) -> Deployment {
         Deployment {
-            id: "dpl_123".into(),
+            id: id.into(),
             url: "example.vercel.app".into(),
             ready_state: Some("READY".into()),
             state: None,
             created: None,
             target: target.map(ToOwned::to_owned),
-            live,
+            live: None,
+            project_id: Some("prj_123".into()),
             meta: serde_json::Value::Null,
         }
+    }
+
+    fn project_with_production_target(state: &str, substate: Option<&str>) -> ProjectDetails {
+        serde_json::from_value(json!({
+            "id": "prj_123",
+            "name": "demo",
+            "targets": {
+                "production": {
+                    "id": "dpl_current",
+                    "url": "current.vercel.app",
+                    "readyState": state,
+                    "readySubstate": substate,
+                    "target": "production",
+                    "meta": { "githubCommitSha": "abc123" }
+                }
+            }
+        }))
+        .unwrap()
     }
 
     fn env(key: &str, target: &[&str], git_branch: Option<&str>) -> ProjectEnvironmentVariable {
@@ -492,6 +564,18 @@ mod tests {
         assert!(validate_id("prj_123").is_ok());
         assert!(validate_id("my-project").is_ok());
         assert!(validate_id("../../projects").is_err());
+    }
+
+    #[test]
+    fn deployment_list_uid_deserializes_as_id() {
+        let deployment: Deployment = serde_json::from_value(json!({
+            "uid": "dpl_listed",
+            "url": "listed.vercel.app",
+            "readyState": "READY",
+            "target": "production"
+        }))
+        .unwrap();
+        assert_eq!(deployment.id, "dpl_listed");
     }
 
     #[test]
@@ -544,6 +628,48 @@ mod tests {
         }))
         .unwrap();
         assert!(no_git_link.github_link().is_none());
+    }
+
+    #[test]
+    fn project_production_target_requires_ready_and_promoted() {
+        let current = project_with_production_target("READY", Some("PROMOTED"));
+        assert_eq!(
+            current
+                .current_production_target()
+                .map(|target| target.id.as_str()),
+            Some("dpl_current")
+        );
+
+        for (state, substate) in [
+            ("BUILDING", Some("PROMOTED")),
+            ("READY", Some("ROLLING")),
+            ("READY", Some("STAGED")),
+            ("READY", None),
+        ] {
+            assert!(
+                project_with_production_target(state, substate)
+                    .current_production_target()
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn current_production_identity_fails_closed() {
+        let current = normalize_current_target(
+            deployment("dpl_current", Some("production")),
+            Some("dpl_current"),
+        );
+        assert_eq!(current.target.as_deref(), Some("production"));
+
+        for current_id in [None, Some("dpl_other")] {
+            let stale =
+                normalize_current_target(deployment("dpl_current", Some("production")), current_id);
+            assert_eq!(stale.target, None);
+        }
+
+        let preview = normalize_current_target(deployment("dpl_preview", Some("preview")), None);
+        assert_eq!(preview.target.as_deref(), Some("preview"));
     }
 
     #[test]
@@ -638,23 +764,5 @@ mod tests {
             git_branch: None,
         };
         assert!(preview_variable_is_sensitive(&variable));
-    }
-
-    #[test]
-    fn stale_production_target_is_not_treated_as_current() {
-        let normalized = normalize_current_target(deployment(Some("production"), Some(false)));
-        assert_eq!(normalized.target, None);
-    }
-
-    #[test]
-    fn live_production_target_remains_current() {
-        let normalized = normalize_current_target(deployment(Some("production"), Some(true)));
-        assert_eq!(normalized.target.as_deref(), Some("production"));
-    }
-
-    #[test]
-    fn missing_live_signal_preserves_provider_target() {
-        let normalized = normalize_current_target(deployment(Some("production"), None));
-        assert_eq!(normalized.target.as_deref(), Some("production"));
     }
 }
