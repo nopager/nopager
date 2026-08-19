@@ -99,6 +99,16 @@ struct VercelConnectionRequest {
     team_id: String,
     project_id: String,
     token: String,
+    #[serde(default)]
+    github_app_id: u64,
+    #[serde(default)]
+    github_installation_id: u64,
+    #[serde(default)]
+    github_private_key: String,
+    #[serde(default)]
+    repo_owner: String,
+    #[serde(default)]
+    repo_name: String,
 }
 
 #[derive(Deserialize)]
@@ -356,6 +366,46 @@ async fn test_vercel_connection(
     if !authorized(&state, &headers).await {
         return api_error(StatusCode::UNAUTHORIZED, "unauthorized");
     }
+    if request.github_app_id == 0
+        || request.github_installation_id == 0
+        || request.github_private_key.trim().is_empty()
+        || request.repo_owner.trim().is_empty()
+        || request.repo_name.trim().is_empty()
+    {
+        return api_error(StatusCode::BAD_REQUEST, "github_connection_failed");
+    }
+    let github_auth = match GitHubAppAuth::new(
+        request.github_app_id,
+        request.github_installation_id,
+        SecretString::from(normalize_pem(&request.github_private_key)),
+    ) {
+        Ok(auth) => auth,
+        Err(error) => {
+            tracing::warn!(%error, "GitHub preflight configuration failed");
+            return api_error(StatusCode::UNPROCESSABLE_ENTITY, "github_connection_failed");
+        }
+    };
+    let github = match github_auth.installation_client(&request.repo_name).await {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::warn!(%error, "GitHub preflight installation token failed");
+            return api_error(StatusCode::UNPROCESSABLE_ENTITY, "github_connection_failed");
+        }
+    };
+    let github_repository = match github
+        .get_repository(&request.repo_owner, &request.repo_name)
+        .await
+    {
+        Ok(repository) => repository,
+        Err(error) => {
+            tracing::warn!(%error, "GitHub preflight repository lookup failed");
+            return api_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "github_repository_not_accessible",
+            );
+        }
+    };
+
     let client = match VercelClient::new(
         SecretString::from(request.token),
         optional_nonempty(&request.team_id),
@@ -376,6 +426,21 @@ async fn test_vercel_connection(
             );
         }
     };
+    if let Err(error) = validate_vercel_github_source(
+        &project,
+        GitHubSourceIdentity {
+            owner: &request.repo_owner,
+            repo: &request.repo_name,
+            repo_id: Some(github_repository.id),
+            default_branch: &github_repository.default_branch,
+        },
+    ) {
+        tracing::warn!(%error, "Vercel setup test found incompatible durable GitHub source");
+        return api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            source_compatibility_error_code(&error),
+        );
+    }
     match client.list_deployments(&project.id, 10).await {
         Ok(deployments) if deployments.iter().any(vercel_production_is_ready) => (
             StatusCode::OK,

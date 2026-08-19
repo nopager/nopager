@@ -94,6 +94,16 @@ const setupErrors: Record<string, string> = {
     "Vercel authentication worked, but the selected project is not accessible. Check the project name/ID and account or Team ID.",
   vercel_production_deployment_not_found:
     "No READY production deployment was found for this Vercel project. Deploy the app to production once, then retry.",
+  vercel_github_link_required:
+    "This Vercel project is not linked to a supported GitHub repository. Link the project to the same GitHub repository NoPager will repair, then retry.",
+  vercel_github_repository_unverifiable:
+    "NoPager could not prove which GitHub repository this Vercel project deploys. Use a GitHub-linked Vercel project that exposes repository identity, then retry.",
+  vercel_github_repository_mismatch:
+    "This Vercel project deploys a different GitHub repository than the repository NoPager verified. Select the Vercel project connected to the protected repository.",
+  vercel_production_branch_missing:
+    "NoPager could not read an explicit Vercel Production Branch for this GitHub-linked project. Configure the Production Branch in Vercel, then retry.",
+  vercel_production_branch_mismatch:
+    "Vercel's Production Branch does not match the protected GitHub repository's default branch. Align them before NoPager can guarantee durable repairs reach production.",
   provider_connection_failed:
     "The model provider rejected this connection. Check the API key and selected model, then try again.",
   provider_api_key_required: "Enter your provider API key first.",
@@ -496,6 +506,11 @@ export default function SetupPage() {
               teamId: data.vercelTeamId,
               projectId: data.vercelProjectId,
               token: data.vercelToken,
+              githubAppId: Number(data.githubAppId),
+              githubInstallationId: Number(data.githubInstallationId),
+              githubPrivateKey: data.githubPrivateKey,
+              repoOwner: data.repoOwner,
+              repoName: data.repoName,
             },
           ],
           3: [
@@ -702,7 +717,7 @@ function description(step: number) {
   return [
     "This account exists only on your NoPager installation and controls production approvals.",
     "Give NoPager access only to the repository it may inspect and repair. The recommended path creates the least-privilege GitHub App for you.",
-    "Connect the Vercel project NoPager will use for Preview verification, promotion, and rollback.",
+    "Connect the Vercel project NoPager will use for Preview verification, promotion, and rollback. NoPager verifies that it deploys the same GitHub source before continuing.",
     "Bring your own model API key. NoPager does not proxy or pay for model usage; your provider bills your account directly.",
     "NoPager needs a public HTTPS health URL that returns HTTP 200 when the app is healthy.",
     "Safe Mode is the recommended starting point and always requires approval before production promotion.",
@@ -997,10 +1012,14 @@ function fields(
   if (step === 2) {
     return (
       <>
-        <SetupNote title="Your Vercel account stays yours">
-          Use a Vercel access token that can read this project and manage its
-          deployments. Team ID is only needed for team-owned projects. The
-          Vercel webhook is optional because NoPager also polls deployments.
+        <SetupNote title="Verify the production source path now">
+          NoPager re-authenticates the GitHub App on the server, reads the exact
+          repository ID and default branch again, then verifies that this Vercel
+          project is linked to the same GitHub repository with the same explicit
+          Production Branch. Final Protect App repeats the authoritative checks
+          before anything is persisted. Team ID is only needed for team-owned
+          projects; the Vercel webhook remains optional because polling is also
+          active.
         </SetupNote>
         <Input
           label="Project ID or project name"
