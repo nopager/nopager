@@ -130,6 +130,17 @@ async fn find_current_production_for_commit(
     }
 }
 
+pub(crate) async fn current_live_production_readiness(
+    vercel: &VercelClient,
+    deployment_id: &str,
+) -> anyhow::Result<ProductionReadiness> {
+    let current = vercel.get_deployment(deployment_id).await?;
+    if deployment_failed(&current) {
+        anyhow::bail!("Vercel production deployment {deployment_id} failed");
+    }
+    Ok(explicit_live_production_readiness(&current))
+}
+
 pub(crate) async fn current_production_readiness(
     vercel: &VercelClient,
     deployment_id: &str,
@@ -144,12 +155,7 @@ pub(crate) async fn current_production_readiness(
             "Vercel production deployment {deployment_id} no longer matches repair commit {commit_sha}"
         );
     }
-    if current.ready_state.as_deref() != Some("READY")
-        || current.target.as_deref() != Some("production")
-    {
-        return Ok(ProductionReadiness::Pending);
-    }
-    Ok(ProductionReadiness::Ready)
+    Ok(production_readiness(&current))
 }
 
 pub(crate) async fn verify_current_production(
@@ -162,6 +168,24 @@ pub(crate) async fn verify_current_production(
         ProductionReadiness::Pending => {
             anyhow::bail!("Vercel production deployment {deployment_id} is not current/live yet")
         }
+    }
+}
+
+fn production_readiness(deployment: &Deployment) -> ProductionReadiness {
+    if deployment.ready_state.as_deref() == Some("READY")
+        && deployment.target.as_deref() == Some("production")
+    {
+        ProductionReadiness::Ready
+    } else {
+        ProductionReadiness::Pending
+    }
+}
+
+fn explicit_live_production_readiness(deployment: &Deployment) -> ProductionReadiness {
+    if deployment.live == Some(true) {
+        production_readiness(deployment)
+    } else {
+        ProductionReadiness::Pending
     }
 }
 
@@ -274,6 +298,66 @@ mod tests {
         );
         let candidate = newest_production_candidate(vec![old, new], "merge-sha").unwrap();
         assert_eq!(candidate.id, "dpl_new");
+    }
+
+    #[test]
+    fn production_readiness_requires_ready_current_target() {
+        let ready = deployment(
+            "dpl_ready",
+            "merge-sha",
+            "READY",
+            Some("production"),
+            Some(true),
+            1,
+        );
+        assert_eq!(production_readiness(&ready), ProductionReadiness::Ready);
+
+        let building = deployment(
+            "dpl_building",
+            "merge-sha",
+            "BUILDING",
+            Some("production"),
+            Some(true),
+            1,
+        );
+        assert_eq!(
+            production_readiness(&building),
+            ProductionReadiness::Pending
+        );
+
+        let stale = deployment("dpl_stale", "merge-sha", "READY", None, Some(false), 1);
+        assert_eq!(production_readiness(&stale), ProductionReadiness::Pending);
+    }
+
+    #[test]
+    fn rollback_readiness_requires_explicit_live_signal() {
+        let live = deployment(
+            "dpl_live",
+            "known-good",
+            "READY",
+            Some("production"),
+            Some(true),
+            1,
+        );
+        assert_eq!(
+            explicit_live_production_readiness(&live),
+            ProductionReadiness::Ready
+        );
+
+        for live_signal in [None, Some(false)] {
+            let ambiguous = deployment(
+                "dpl_not_live",
+                "known-good",
+                "READY",
+                Some("production"),
+                live_signal,
+                1,
+            );
+            assert_eq!(
+                explicit_live_production_readiness(&ambiguous),
+                ProductionReadiness::Pending
+            );
+        }
     }
 
     #[test]

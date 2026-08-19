@@ -62,6 +62,8 @@ const MAX_PROMOTION_ACTIVATION_POLLS: u64 = 60;
 const PROMOTION_ACTIVATION_POLL_SECONDS: i64 = 5;
 const MAX_DURABLE_DEPLOYMENT_POLLS: u64 = 60;
 const DURABLE_DEPLOYMENT_POLL_SECONDS: i64 = 10;
+const MAX_ROLLBACK_ACTIVATION_POLLS: u64 = 60;
+const ROLLBACK_ACTIVATION_POLL_SECONDS: i64 = 5;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -121,6 +123,9 @@ async fn execute_job(database: &Database, job: &Job) -> anyhow::Result<()> {
         }
         "verify" if job.payload_json.get("phase").and_then(Value::as_str) == Some("production") => {
             verify_promoted_production(database, &job.payload_json).await
+        }
+        "verify" if job.payload_json.get("phase").and_then(Value::as_str) == Some("rollback") => {
+            verify_rolled_back_production(database, &job.payload_json).await
         }
         "verify"
             if job.payload_json.get("phase").and_then(Value::as_str)
@@ -558,6 +563,93 @@ async fn watch_durable_production(database: &Database, payload: &Value) -> anyho
                 "deploymentId": deployment_id,
                 "commitSha": commit_sha
             }),
+        })
+        .await?;
+    legacy::enqueue_cleanup_public(database, incident_id, attempt_id).await?;
+    Ok(())
+}
+
+async fn verify_rolled_back_production(database: &Database, payload: &Value) -> anyhow::Result<()> {
+    let incident_id = required_string(payload, "incidentId")?.parse()?;
+    let attempt_id = required_string(payload, "attemptId")?.parse()?;
+    let poll = payload.get("poll").and_then(Value::as_u64).unwrap_or(0);
+    let work = database.incident_work(incident_id).await?;
+    if work.state != IncidentState::RolledBack {
+        return Ok(());
+    }
+
+    let (known_good_id, _) = database
+        .latest_known_good_deployment(work.project_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no known-good production deployment exists"))?;
+    let vercel = legacy::vercel_client_public(database, &work).await?;
+
+    if poll > MAX_ROLLBACK_ACTIVATION_POLLS {
+        database
+            .escalate_incident(
+                incident_id,
+                "Vercel accepted rollback but the known-good deployment never became current/live production",
+            )
+            .await?;
+        return Ok(());
+    }
+
+    match production::current_live_production_readiness(&vercel, &known_good_id).await {
+        Ok(production::ProductionReadiness::Pending) => {
+            let next = poll + 1;
+            database
+                .enqueue_after(
+                    JobType::Verify,
+                    &format!("incident:{incident_id}:verify-rollback:{next}"),
+                    Some(incident_id),
+                    &json!({
+                        "incidentId": incident_id,
+                        "attemptId": attempt_id,
+                        "phase": "rollback",
+                        "poll": next
+                    }),
+                    5,
+                    ROLLBACK_ACTIVATION_POLL_SECONDS,
+                )
+                .await?;
+            return Ok(());
+        }
+        Ok(production::ProductionReadiness::Ready) => {}
+        Err(error) => {
+            let reason = format!("rollback deployment verification failed: {error}");
+            database.escalate_incident(incident_id, &reason).await?;
+            return Ok(());
+        }
+    }
+
+    if let Err(error) = legacy::require_healthy_public(&work.health_check_url).await {
+        let reason = format!(
+            "known-good rollback deployment is current/live but production health is still failing: {error}"
+        );
+        database.escalate_incident(incident_id, &reason).await?;
+        return Ok(());
+    }
+
+    database
+        .record_audit_event(
+            work.project_id,
+            Some(incident_id),
+            "worker",
+            "vercel.production.rollback_verified",
+            &known_good_id,
+            "success",
+            &json!({ "checks": ["deployment_current", "deployment_ready", "health"] }),
+        )
+        .await?;
+    database
+        .transition_incident(IncidentTransition {
+            project_id: work.project_id,
+            incident_id,
+            expected: IncidentState::RolledBack,
+            next: IncidentState::Resolved,
+            actor: "worker".into(),
+            message: "Rollback restored the known-good deployment as current production and health recovered".into(),
+            metadata: json!({ "deploymentId": known_good_id }),
         })
         .await?;
     legacy::enqueue_cleanup_public(database, incident_id, attempt_id).await?;
