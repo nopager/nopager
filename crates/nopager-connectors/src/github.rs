@@ -8,6 +8,7 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use reqwest::{Client, RequestBuilder};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use url::Url;
 
 use crate::{ConnectorError, decode};
@@ -174,7 +175,15 @@ pub struct PullRequestInput {
 pub struct PullRequest {
     pub number: u64,
     pub html_url: String,
+    pub node_id: String,
+    #[serde(default)]
+    pub draft: bool,
+    #[serde(default)]
+    pub merged_at: Option<String>,
+    #[serde(default)]
+    pub merge_commit_sha: Option<String>,
     pub head: GitObject,
+    pub base: GitObject,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -201,6 +210,13 @@ struct BlobResponse {
 #[derive(Deserialize)]
 struct GitRefResponse {
     object: GitObject,
+}
+
+#[derive(Debug, Deserialize)]
+struct MergePullRequestResponse {
+    sha: String,
+    merged: bool,
+    message: String,
 }
 
 #[derive(Serialize)]
@@ -451,6 +467,133 @@ impl GitHubClient {
         })
     }
 
+    pub async fn land_repair_pr(
+        &self,
+        owner: &str,
+        repository: &str,
+        branch: &str,
+        expected_head_sha: &str,
+        expected_base_sha: &str,
+    ) -> Result<String, ConnectorError> {
+        validate_segment(owner, "owner")?;
+        validate_segment(repository, "repository")?;
+        validate_git_ref(branch, "repair branch")?;
+        validate_segment(expected_head_sha, "repair head SHA")?;
+        validate_segment(expected_base_sha, "repair base SHA")?;
+        let repo = format!("repos/{owner}/{repository}");
+        let pulls: Vec<PullRequest> = decode(
+            self.request(reqwest::Method::GET, &format!("{repo}/pulls"))?
+                .query(&[
+                    ("state", "all"),
+                    ("head", &format!("{owner}:{branch}")),
+                    ("per_page", "20"),
+                ])
+                .send()
+                .await?,
+        )
+        .await?;
+        let pull_request = pulls
+            .into_iter()
+            .find(|pull_request| pull_request.head.sha == expected_head_sha)
+            .ok_or_else(|| {
+                ConnectorError::InvalidConfiguration(
+                    "verified repair pull request could not be found at the expected head SHA"
+                        .into(),
+                )
+            })?;
+        validate_repair_pull_request(&pull_request, expected_head_sha, expected_base_sha)?;
+
+        if pull_request.merged_at.is_some() {
+            return pull_request
+                .merge_commit_sha
+                .ok_or_else(|| ConnectorError::Api {
+                    status: reqwest::StatusCode::BAD_GATEWAY,
+                    message: "merged GitHub repair pull request omitted merge commit SHA".into(),
+                });
+        }
+
+        if pull_request.draft {
+            self.mark_pull_request_ready(&pull_request.node_id).await?;
+        }
+
+        let response: MergePullRequestResponse = decode(
+            self.request(
+                reqwest::Method::PUT,
+                &format!("{repo}/pulls/{}/merge", pull_request.number),
+            )?
+            .json(&serde_json::json!({
+                "sha": expected_head_sha,
+                "merge_method": "merge",
+                "commit_title": format!("Merge verified NoPager repair #{}", pull_request.number),
+                "commit_message": "NoPager sandbox and Vercel Preview verification passed before this production-boundary merge."
+            }))
+            .send()
+            .await?,
+        )
+        .await?;
+        if !response.merged || response.sha.trim().is_empty() {
+            return Err(ConnectorError::Api {
+                status: reqwest::StatusCode::CONFLICT,
+                message: response.message,
+            });
+        }
+        Ok(response.sha)
+    }
+
+    async fn mark_pull_request_ready(
+        &self,
+        pull_request_node_id: &str,
+    ) -> Result<(), ConnectorError> {
+        if pull_request_node_id.trim().is_empty() {
+            return Err(ConnectorError::InvalidConfiguration(
+                "GitHub pull request node id is empty".into(),
+            ));
+        }
+        let endpoint = self
+            .api_base
+            .join("graphql")
+            .map_err(|error| ConnectorError::InvalidConfiguration(error.to_string()))?;
+        let response = github_headers(self.http.post(endpoint))
+            .bearer_auth(self.token.expose_secret())
+            .json(&serde_json::json!({
+                "query": "mutation MarkNoPagerRepairReady($pullRequestId: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $pullRequestId }) { pullRequest { isDraft } } }",
+                "variables": { "pullRequestId": pull_request_node_id }
+            }))
+            .send()
+            .await?;
+        let status = response.status();
+        let body: Value = if status.is_success() {
+            response.json().await?
+        } else {
+            return Err(ConnectorError::Api {
+                status,
+                message: response.text().await.unwrap_or_default(),
+            });
+        };
+        if body
+            .get("errors")
+            .and_then(Value::as_array)
+            .is_some_and(|errors| !errors.is_empty())
+        {
+            return Err(ConnectorError::Api {
+                status: reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+                message: body["errors"].to_string(),
+            });
+        }
+        if body
+            .pointer("/data/markPullRequestReadyForReview/pullRequest/isDraft")
+            .and_then(Value::as_bool)
+            != Some(false)
+        {
+            return Err(ConnectorError::Api {
+                status: reqwest::StatusCode::BAD_GATEWAY,
+                message: "GitHub did not confirm the repair pull request is ready for review"
+                    .into(),
+            });
+        }
+        Ok(())
+    }
+
     pub async fn download_archive(
         &self,
         owner: &str,
@@ -508,6 +651,25 @@ impl GitHubClient {
             .await
             .map_err(|error| ConnectorError::Archive(error.to_string()))?
     }
+}
+
+fn validate_repair_pull_request(
+    pull_request: &PullRequest,
+    expected_head_sha: &str,
+    expected_base_sha: &str,
+) -> Result<(), ConnectorError> {
+    if pull_request.head.sha != expected_head_sha {
+        return Err(ConnectorError::InvalidConfiguration(
+            "repair pull request head changed after Preview verification".into(),
+        ));
+    }
+    if pull_request.base.sha != expected_base_sha {
+        return Err(ConnectorError::InvalidConfiguration(
+            "repository base branch moved after Preview verification; refusing to merge unverified combined code"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 fn repair_commit_message(title: &str) -> String {
@@ -701,6 +863,19 @@ fn validate_repo_path(path: &str) -> Result<(), ConnectorError> {
 mod tests {
     use super::*;
 
+    fn repair_pr(head: &str, base: &str) -> PullRequest {
+        PullRequest {
+            number: 42,
+            html_url: "https://github.com/example/app/pull/42".into(),
+            node_id: "PR_node".into(),
+            draft: true,
+            merged_at: None,
+            merge_commit_sha: None,
+            head: GitObject { sha: head.into() },
+            base: GitObject { sha: base.into() },
+        }
+    }
+
     #[test]
     fn stable_safe_branch_name() {
         assert_eq!(
@@ -715,6 +890,14 @@ mod tests {
         assert!(message.starts_with("Repair checkout regression"));
         assert!(message.contains("[skip ci]"));
         assert!(message.contains("unreviewed code"));
+    }
+
+    #[test]
+    fn repair_pr_merge_requires_the_exact_previewed_head_and_base() {
+        let pull_request = repair_pr("repair-sha", "base-sha");
+        assert!(validate_repair_pull_request(&pull_request, "repair-sha", "base-sha").is_ok());
+        assert!(validate_repair_pull_request(&pull_request, "other", "base-sha").is_err());
+        assert!(validate_repair_pull_request(&pull_request, "repair-sha", "new-main").is_err());
     }
 
     #[test]
