@@ -487,7 +487,10 @@ fn preview_secrets_explicitly_allowed() -> bool {
         })
 }
 
-fn normalize_deployment_list(deployments: Vec<Deployment>, project: &ProjectDetails) -> Vec<Deployment> {
+fn normalize_deployment_list(
+    deployments: Vec<Deployment>,
+    project: &ProjectDetails,
+) -> Vec<Deployment> {
     let current = project.current_production_target();
     let current_production_id = current.map(|target| target.id.as_str());
     let mut deployments = deployments
@@ -705,10 +708,8 @@ mod tests {
     #[test]
     fn deployment_list_injects_current_production_outside_bounded_history() {
         let project = project_with_production_target("READY", Some("PROMOTED"));
-        let deployments = normalize_deployment_list(
-            vec![deployment("dpl_preview", Some("preview"))],
-            &project,
-        );
+        let deployments =
+            normalize_deployment_list(vec![deployment("dpl_preview", Some("preview"))], &project);
         assert_eq!(deployments[0].id, "dpl_current");
         assert_eq!(deployments[0].target.as_deref(), Some("production"));
         assert_eq!(deployments[0].project_id.as_deref(), Some("prj_123"));
