@@ -58,6 +58,8 @@ mod legacy {
     include!("legacy_pipeline.rs");
 }
 
+const MAX_PROMOTION_ACTIVATION_POLLS: u64 = 60;
+const PROMOTION_ACTIVATION_POLL_SECONDS: i64 = 5;
 const MAX_DURABLE_DEPLOYMENT_POLLS: u64 = 60;
 const DURABLE_DEPLOYMENT_POLL_SECONDS: i64 = 10;
 
@@ -140,6 +142,7 @@ async fn execute_job(database: &Database, job: &Job) -> anyhow::Result<()> {
 async fn verify_promoted_production(database: &Database, payload: &Value) -> anyhow::Result<()> {
     let incident_id = required_string(payload, "incidentId")?.parse()?;
     let attempt_id = required_string(payload, "attemptId")?.parse()?;
+    let poll = payload.get("poll").and_then(Value::as_u64).unwrap_or(0);
     let work = database.incident_work(incident_id).await?;
     if work.state != IncidentState::VerifyingProduction {
         return Ok(());
@@ -155,13 +158,52 @@ async fn verify_promoted_production(database: &Database, payload: &Value) -> any
         .ok_or_else(|| anyhow::anyhow!("repair commit SHA is missing"))?;
     let vercel = legacy::vercel_client_public(database, &work).await?;
 
-    if let Err(error) =
-        production::verify_current_production(&vercel, deployment_id, commit_sha).await
-    {
-        legacy::begin_rollback_public(database, &work, incident_id, attempt_id, &error.to_string())
-            .await?;
+    if poll > MAX_PROMOTION_ACTIVATION_POLLS {
+        legacy::begin_rollback_public(
+            database,
+            &work,
+            incident_id,
+            attempt_id,
+            "timed out waiting for the promoted repair to become current production",
+        )
+        .await?;
         return Ok(());
     }
+
+    match production::current_production_readiness(&vercel, deployment_id, commit_sha).await {
+        Ok(production::ProductionReadiness::Pending) => {
+            let next = poll + 1;
+            database
+                .enqueue_after(
+                    JobType::Verify,
+                    &format!("incident:{incident_id}:verify-production:{next}"),
+                    Some(incident_id),
+                    &json!({
+                        "incidentId": incident_id,
+                        "attemptId": attempt_id,
+                        "phase": "production",
+                        "poll": next
+                    }),
+                    3,
+                    PROMOTION_ACTIVATION_POLL_SECONDS,
+                )
+                .await?;
+            return Ok(());
+        }
+        Ok(production::ProductionReadiness::Ready) => {}
+        Err(error) => {
+            legacy::begin_rollback_public(
+                database,
+                &work,
+                incident_id,
+                attempt_id,
+                &error.to_string(),
+            )
+            .await?;
+            return Ok(());
+        }
+    }
+
     if let Err(error) = legacy::require_healthy_public(&work.health_check_url).await {
         legacy::begin_rollback_public(database, &work, incident_id, attempt_id, &error.to_string())
             .await?;
@@ -499,8 +541,9 @@ async fn watch_durable_production(database: &Database, payload: &Value) -> anyho
             expected: IncidentState::VerifyingProduction,
             next: IncidentState::Resolved,
             actor: "worker".into(),
-            message: "Production repair stayed healthy and was durably merged into the source branch"
-                .into(),
+            message:
+                "Production repair stayed healthy and was durably merged into the source branch"
+                    .into(),
             metadata: json!({
                 "checks": 3,
                 "deploymentId": deployment_id,
