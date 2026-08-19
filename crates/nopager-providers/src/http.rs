@@ -93,6 +93,7 @@ macro_rules! provider {
                     .structured("repair_proposal", repair_schema(), value)
                     .await?;
                 result.validate()?;
+                result.validate_against_verified_source(&input.diagnosis)?;
                 Ok(result)
             }
         }
@@ -580,6 +581,12 @@ fn redact_prefixed_token(value: &str, prefix: &str, minimum_length: usize) -> St
 }
 
 fn preserve_verified_source_context(result: &mut DiagnosisResult, input: &DiagnosisInput) {
+    result.verified_repair_files = input
+        .verified_repair_files
+        .iter()
+        .filter(|path| crate::validate_repair_path(path).is_ok())
+        .cloned()
+        .collect();
     let context = verified_diff_context(input);
     if context.is_empty() {
         return;
@@ -750,6 +757,7 @@ mod tests {
             deployment: Value::Null,
             health_failure: Value::Null,
             relevant_files: Vec::new(),
+            verified_repair_files: vec!["src/login.ts".into()],
         };
         let mut result = DiagnosisResult {
             suspected_root_cause: "regression".into(),
@@ -763,9 +771,11 @@ mod tests {
             risk_level: RiskLevel::Low,
             validation_plan: vec!["run tests".into()],
             rollback_plan: "rollback".into(),
+            verified_repair_files: Vec::new(),
         };
         preserve_verified_source_context(&mut result, &input);
         assert!(result.has_verified_source_context());
+        assert_eq!(result.verified_repair_files, vec!["src/login.ts"]);
         assert!(
             result
                 .evidence
@@ -841,6 +851,7 @@ mod tests {
             deployment: Value::Null,
             health_failure: Value::Null,
             relevant_files: Vec::new(),
+            verified_repair_files: vec!["src/config.ts".into()],
         };
         let context = verified_diff_context(&input);
         assert!(context.contains(REDACTED));

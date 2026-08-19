@@ -151,18 +151,22 @@ async fn process_diagnosis(database: &Database, payload: &Value) -> anyhow::Resu
         )
     })
     .unwrap_or_else(|| "unknown".into());
-    let recent_commits = if base_sha == "unknown" {
-        Vec::new()
+    let (recent_commits, verified_repair_files) = if base_sha == "unknown" {
+        (Vec::new(), Vec::new())
     } else {
         let github = github_client(database, &work).await?;
         let commit = github
             .get_commit(&work.repo_owner, &work.repo_name, &base_sha)
             .await?;
-        vec![CommitContext {
-            sha: commit.sha,
-            message: commit.message,
-            changed_files: commit.changed_files,
-        }]
+        let verified_repair_files = commit.verified_diff_files.clone();
+        (
+            vec![CommitContext {
+                sha: commit.sha,
+                message: commit.message,
+                changed_files: commit.changed_files,
+            }],
+            verified_repair_files,
+        )
     };
     let provider = provider_for(database, work.project_id).await?;
     let input = DiagnosisInput {
@@ -172,6 +176,7 @@ async fn process_diagnosis(database: &Database, payload: &Value) -> anyhow::Resu
         deployment: work.deployment_context.clone(),
         health_failure: work.trigger_context.clone(),
         relevant_files: Vec::new(),
+        verified_repair_files,
     };
     let diagnosis = provider.diagnose(&input).await?;
     let diagnosis_json = serde_json::to_value(&diagnosis)?;
