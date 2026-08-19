@@ -108,9 +108,7 @@ function recordValue(value: unknown): Record<string, unknown> | null {
 }
 
 function positiveInteger(value: unknown): number | null {
-  return typeof value === "number" &&
-    Number.isSafeInteger(value) &&
-    value > 0
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
     ? value
     : null;
 }
