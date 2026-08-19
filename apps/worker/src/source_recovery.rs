@@ -1,6 +1,6 @@
 use nopager_connectors::{
     github::GitHubAppAuth,
-    github_pull::{PullRequestStatus, get_pull_request_status},
+    github_pull::{PullRequestStatus, get_branch_head, get_pull_request_status},
     github_revert::{RevertPullRequest, RevertPullRequestOutcome, open_revert_pull_request_once},
 };
 use nopager_core::IncidentState;
@@ -491,6 +491,19 @@ pub(crate) async fn watch_source_recovery_production(
         return Ok(());
     }
 
+    if let Err(error) = verify_protected_branch_head(database, &work, merge_sha).await {
+        audit_source_recovery_failure(
+            database,
+            &work,
+            incident_id,
+            "github.source_recovery.protected_branch",
+            merge_sha,
+            &error.to_string(),
+        )
+        .await?;
+        return Ok(());
+    }
+
     database
         .mark_deployment_known_good(work.project_id, deployment_id)
         .await?;
@@ -620,6 +633,27 @@ async fn authoritative_current_target_matches(
         .await?
         .current_production_target()
         .is_some_and(|target| target.id == deployment_id))
+}
+
+async fn verify_protected_branch_head(
+    database: &Database,
+    work: &IncidentWork,
+    merge_sha: &str,
+) -> anyhow::Result<()> {
+    let branch = work
+        .github_metadata
+        .get("baseBranch")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("protected GitHub default branch metadata is missing"))?;
+    let auth = crate::legacy::github_auth_public(database, work).await?;
+    let head = get_branch_head(&auth, &work.repo_owner, &work.repo_name, branch).await?;
+    if head != merge_sha {
+        anyhow::bail!(
+            "protected GitHub branch advanced after the reviewed source revert; expected {merge_sha}, found {head}"
+        );
+    }
+    Ok(())
 }
 
 async fn trusted_created_revert_exists(
