@@ -31,7 +31,8 @@ mod legacy {
         database: &nopager_db::Database,
         work: &nopager_db::IncidentWork,
     ) -> anyhow::Result<nopager_connectors::github::GitHubAppAuth> {
-        if let Ok(credentials) = integration_credentials(database, work.project_id, "github").await {
+        if let Ok(credentials) = integration_credentials(database, work.project_id, "github").await
+        {
             let app_id = required_u64(&credentials, "appId")?;
             let installation_id = required_u64(&credentials, "installationId")?;
             let private_key = required_string(&credentials, "privateKey")?.replace("\\n", "\n");
