@@ -164,9 +164,27 @@ async fn execute_job(database: &Database, job: &Job) -> anyhow::Result<()> {
         }
         "verify"
             if job.payload_json.get("phase").and_then(Value::as_str)
+                == Some("source-revert-review") =>
+        {
+            source_recovery::verify_source_revert_review(database, &job.payload_json).await
+        }
+        "verify"
+            if job.payload_json.get("phase").and_then(Value::as_str)
+                == Some("source-recovery-production") =>
+        {
+            source_recovery::verify_source_recovery_production(database, &job.payload_json).await
+        }
+        "verify"
+            if job.payload_json.get("phase").and_then(Value::as_str)
                 == Some("durable-production") =>
         {
             verify_durable_production(database, &job.payload_json).await
+        }
+        "post-deploy-watch"
+            if job.payload_json.get("phase").and_then(Value::as_str)
+                == Some("source-recovery-production") =>
+        {
+            source_recovery::watch_source_recovery_production(database, &job.payload_json).await
         }
         "post-deploy-watch"
             if job.payload_json.get("phase").and_then(Value::as_str)

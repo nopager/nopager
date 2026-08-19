@@ -100,7 +100,7 @@ async fn ensure_durable_source_compatible(
     .map_err(|error| anyhow::anyhow!("{error}; refusing durable source mutation"))
 }
 
-async fn find_current_production_for_commit(
+pub(crate) async fn find_current_production_for_commit(
     vercel: &VercelClient,
     vercel_project_id: &str,
     commit_sha: &str,
