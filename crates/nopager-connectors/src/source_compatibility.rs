@@ -20,13 +20,19 @@ pub enum SourceCompatibilityError {
     OwnerMismatch { linked: String, expected: String },
     #[error("Vercel GitHub repository '{linked}' does not match protected repository '{expected}'")]
     RepositoryMismatch { linked: String, expected: String },
-    #[error("Vercel GitHub repository id {linked} does not match protected GitHub repository id {expected}")]
+    #[error(
+        "Vercel GitHub repository id {linked} does not match protected GitHub repository id {expected}"
+    )]
     RepositoryIdMismatch { linked: u64, expected: u64 },
-    #[error("Vercel GitHub link did not expose enough repository identity to prove the protected repository")]
+    #[error(
+        "Vercel GitHub link did not expose enough repository identity to prove the protected repository"
+    )]
     MissingRepositoryIdentity,
     #[error("Vercel GitHub link did not expose an explicit Production Branch")]
     MissingProductionBranch,
-    #[error("Vercel Production Branch '{linked}' does not match protected GitHub default branch '{expected}'")]
+    #[error(
+        "Vercel Production Branch '{linked}' does not match protected GitHub default branch '{expected}'"
+    )]
     ProductionBranchMismatch { linked: String, expected: String },
 }
 
