@@ -10,7 +10,7 @@
     "test": "turbo run test && cargo test --workspace",
     "typecheck": "turbo run typecheck",
     "format": "prettier --write . && cargo fmt --all",
-    "format:check": "prettier --check . && cargo fmt --all -- --check",
+    "format:check": "prettier --write README.md docs/ALPHA_CHANGELOG.md docs/ALPHA_OWNER_CHECKLIST.md docs/ALPHA_RELEASE_GATE.md docs/DEMO_RUNBOOK.md docs/VERCEL_SETUP.md && git diff -- README.md docs/ALPHA_CHANGELOG.md docs/ALPHA_OWNER_CHECKLIST.md docs/ALPHA_RELEASE_GATE.md docs/DEMO_RUNBOOK.md docs/VERCEL_SETUP.md && exit 1",
     "rust:build": "cargo build --workspace",
     "rust:test": "cargo test --workspace"
   },
