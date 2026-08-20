@@ -42,3 +42,17 @@ If production verification fails after the repair has already landed in protecte
 - Review incident timelines with the design partner after the first controlled run.
 - Record any manual intervention before the intended Safe Mode approval/review boundaries.
 - Do not move a customer to Autopilot because one demo succeeded. Keep external design partners in Safe Mode until the documented Alpha gate has repeatedly passed.
+
+## Trial offboarding
+
+A design partner must be able to remove NoPager without depending on a central NoPager service.
+
+1. Activate the Kill Switch before changing credentials or integrations.
+2. In GitHub, uninstall the NoPager GitHub App from the repository/account or remove the repository from the App installation.
+3. Revoke the Vercel access token used for the trial.
+4. Revoke or rotate the BYOK model-provider API key used for the trial.
+5. Remove any optional Vercel webhook and Protection Bypass for Automation secret created specifically for NoPager.
+6. Decide whether to retain the self-hosted incident/audit history for evaluation. If it must be destroyed, remove the NoPager PostgreSQL data and encrypted backups according to the design partner's retention policy.
+7. Retain or securely destroy `.env` together with the database backup; keeping one without the matching `NOPAGER_MASTER_KEY` does not preserve usable encrypted integration credentials.
+
+Because the Alpha is self-hosted and BYOK, provider credentials and stored incident data remain under the operator's infrastructure/account control. NoPager should never claim that revoking one provider credential automatically deletes data retained by another provider; model-provider retention is governed by that provider/account policy.
