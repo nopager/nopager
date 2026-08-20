@@ -30,7 +30,13 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
-      - run: sh -n scripts/quickstart.sh
+      - name: Validate shell entrypoints
+        run: |
+          sh -n scripts/quickstart.sh
+          sh -n scripts/create-dogfood-repo.sh
+          sh -n scripts/test-create-dogfood-repo.sh
+      - name: Exercise dogfood repository bootstrap safety
+        run: sh scripts/test-create-dogfood-repo.sh
 
   self-host-smoke:
     runs-on: ubuntu-latest
