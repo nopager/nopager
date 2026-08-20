@@ -44,12 +44,14 @@ A release candidate is ready for a design partner only when the following end-to
 17. Safe Mode enters `WAITING_APPROVAL` instead of mutating production.
 18. Incident Detail clearly shows the outcome, evidence, patch, validation, Preview, policy, and approval state.
 19. Administrator approval promotes the verified deployment.
-20. Production verification passes before the incident becomes `RESOLVED`.
+20. NoPager durably lands the verified repair in the protected GitHub source path and verifies the corresponding Git-driven Production deployment before the incident becomes `RESOLVED`.
 21. Audit events and the complete incident timeline remain available afterwards.
-22. Separately force a production-verification failure and prove NoPager restores the recorded known-good deployment and verifies rollback.
-23. Activate the Kill Switch during a controlled incident and prove read-only monitoring continues while mutating work remains blocked.
+22. Separately force a production-verification failure after the repair has been durably merged and prove NoPager restores the recorded pre-incident known-good deployment and verifies rollback without overwriting an unrelated newer Production deployment.
+23. Prove that traffic recovery alone does not close the incident while the failed repair remains on the protected GitHub source branch. NoPager must create or surface a source-revert review action and keep the incident human-visible.
+24. Review and merge the exact NoPager-created draft source-revert PR, then prove NoPager closes source recovery only after the protected GitHub default-branch head still matches that reviewed revert, the corresponding Git-driven Vercel deployment is the authoritative current Production target, and production health passes the full verification window. This final closure must be recorded as human-assisted, not autonomous.
+25. Activate the Kill Switch during a controlled incident and prove read-only monitoring continues while mutating work remains blocked.
 
-If any mandatory safety gate fails, the flow must stop or roll back. It must never "best effort" its way into production.
+If any mandatory safety gate fails, the flow must stop or roll back. It must never "best effort" its way into production or report source recovery merely because traffic was restored.
 
 ## Three supported incident scenarios
 
@@ -101,8 +103,13 @@ Pass criteria:
 - **Preview health check fails:** Hard block production promotion.
 - **Kill Switch is active:** Block mutations while keeping read-only monitoring/evidence collection.
 - **No known rollback target:** Never Autopilot. Require explicit approval.
-- **Production verification fails:** Roll back to the latest known-good deployment and verify rollback.
-- **Rollback verification fails:** Escalate immediately and keep mutations stopped.
+- **Production verification fails before the repair is durably merged:** Roll back to the latest known-good deployment and verify rollback.
+- **Production verification fails after the repair is durably merged:** Restore traffic to the pre-incident known-good deployment, but keep the incident escalated until the protected source is recovered. Never treat the failed merged repair as the rollback baseline.
+- **Current Vercel Production changed outside the active NoPager repair:** Refuse the automatic rollback rather than overwrite the external deployment.
+- **Source-revert creation is uncertain:** Do not retry the GitHub source mutation blindly. Surface the candidate/error for human verification.
+- **Source-revert PR identity changes after NoPager creates it:** Stop automatic closure and keep the incident escalated.
+- **Reviewed source revert is merged but protected GitHub source or authoritative Vercel Production no longer matches it:** Do not report source/runtime alignment. Keep the incident escalated.
+- **Rollback or source-recovery health verification fails:** Escalate immediately and keep mutations stopped.
 
 ## Setup usability gate
 
@@ -116,7 +123,7 @@ The remaining setup work after Alpha should focus on reducing Vercel credential 
 
 ## Design partner operating rule
 
-Use Safe Mode for every external design partner until NoPager has repeatedly passed the three scenarios above and multiple real incidents without an unsafe promotion.
+Use Safe Mode for every external design partner until NoPager has repeatedly passed the three scenarios above, the durable rollback/source-recovery path, and multiple real incidents without an unsafe promotion.
 
 Autopilot is for controlled dogfood only during the first Alpha.
 
@@ -135,8 +142,12 @@ For every incident, record:
 - whether production approval was granted;
 - production verification result;
 - rollback result when applicable;
-- time to recovery;
+- source-recovery result when a merged repair required reversal;
+- whether a source-revert PR required human review and whether its identity remained unchanged;
+- whether the protected GitHub source and authoritative Vercel Production converged on the reviewed recovery commit;
+- time to traffic recovery;
+- time to durable source/runtime recovery;
 - whether the owner had to intervene before the approval step;
 - whether the owner would trust the same class of repair again.
 
-The primary product metric is **Resolved without owner intervention before the production approval boundary**. The commercial learning metric is whether a real team would keep NoPager connected to production after the trial.
+The primary product metric is **Resolved without owner intervention before the production approval boundary**. Human review of a source-revert after a failed durable repair is a safety action and must not be counted as autonomous resolution. The commercial learning metric is whether a real team would keep NoPager connected to production after the trial.
