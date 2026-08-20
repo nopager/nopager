@@ -1,6 +1,6 @@
 # Vercel setup
 
-NoPager uses the Vercel REST API for deployment discovery, Preview creation, promotion, rollback, production-deployment polling, and Preview environment metadata checks.
+NoPager uses the Vercel REST API for project/source verification, deployment discovery, Preview creation, promotion, rollback, production-deployment polling, and Preview environment metadata checks.
 
 ## Access token
 
@@ -13,6 +13,30 @@ For a **team-owned** project, enter the Team ID that owns the project and ensure
 In **Project ID or project name**, enter either value. NoPager resolves the project through Vercel and stores the canonical project ID and name automatically.
 
 The token must be able to read the project's environment-variable metadata. NoPager does not request decrypted environment-variable values for the Preview safety check.
+
+## Git source compatibility
+
+The selected Vercel project must be durably connected to the same GitHub repository that NoPager protects. Setup fails closed when NoPager cannot prove that source identity.
+
+NoPager verifies:
+
+- the Vercel project uses a supported GitHub/GitHub Limited link;
+- the linked GitHub owner matches the protected repository owner;
+- repository name and/or repository ID prove the same repository identity;
+- the Vercel project has an explicit Production Branch;
+- that Production Branch matches the protected GitHub default branch.
+
+The setup wizard performs this check during the Vercel connection step for early feedback and repeats it with fresh provider data immediately before **Protect App**. Browser-supplied identity is never the final security boundary.
+
+Common source-compatibility errors:
+
+- `vercel_github_link_required`: connect the Vercel project to the protected GitHub repository using Vercel's Git integration.
+- `vercel_github_repository_unverifiable`: Vercel did not expose enough repository identity to prove the link safely.
+- `vercel_github_repository_mismatch`: the Vercel project is linked to a different GitHub repository.
+- `vercel_production_branch_missing`: configure an explicit Production Branch in Vercel.
+- `vercel_production_branch_mismatch`: make the Vercel Production Branch match the protected GitHub default branch before protecting the app.
+
+NoPager does not guess a missing Production Branch as `main`.
 
 ## Deployment detection
 
@@ -83,11 +107,19 @@ The production health URL configured during setup must still pass publicly witho
 
 Treat this bypass secret like a deployment credential. Keep `.env` private, rotate the secret in Vercel if it is exposed, and restart the Worker after rotation.
 
-## Production deployment requirement
+## Authoritative current Production and rollback baseline
 
-During setup, NoPager verifies that the selected project is accessible and has a **READY production deployment**. The newest READY production deployment in the returned deployment history becomes the initial known-good rollback point; failed or canceled production attempts are never accepted as that baseline. If setup reports `vercel_production_deployment_not_found`, create a healthy production deployment first and retry.
+NoPager does **not** treat an arbitrary deployment with `target=production` as proof that it is currently serving Production traffic. Historical, staged, or previously promoted Production deployments are not interchangeable with Vercel's authoritative current Production target.
 
-After setup, later externally-created READY production deployments become eligible as the rollback target only after NoPager observes a successful production health check and no incident is active. This prevents a newly created deployment from becoming known-good based on provider state alone.
+During setup, NoPager reads the project's authoritative Production target and requires a concrete current deployment identity. That deployment must be Production and `READY`; when Vercel explicitly reports a non-current/staged substate such as staged or rolling, NoPager fails closed. A provider response that omits optional current-substate metadata is accepted only when the project target itself proves current Production identity and the deployment is `READY`.
+
+That exact current deployment becomes the initial known-good rollback baseline. NoPager does not choose the newest READY item from deployment history merely because it is labeled Production.
+
+After setup, a new deployment is promoted to the known-good baseline only after the corresponding durable GitHub repair has become authoritative current Vercel Production and production health has passed the verification window. The temporary promoted repair does not overwrite the pre-incident rollback baseline before durable closure.
+
+If production verification fails after source has already been merged, NoPager may restore traffic to the pre-incident known-good deployment, but the incident remains escalated until protected GitHub source is also recovered through a reviewed source-revert.
+
+Before an automatic rollback mutation, NoPager re-reads authoritative current Production. If a third-party or human deployment has taken over, it refuses the rollback rather than overwriting that external deployment.
 
 ## Health URL
 
@@ -97,8 +129,15 @@ The production health check is configured separately from the Vercel generated d
 
 - `vercel_project_not_accessible`: verify the token, Team ID scope, and project ID/name.
 - `vercel_connection_failed`: verify token validity and account/team access.
-- `vercel_production_deployment_not_found`: deploy the project to Production and wait until it is READY, then retry setup.
+- `vercel_github_link_required`: connect the project to GitHub through Vercel's supported Git integration.
+- `vercel_github_repository_unverifiable`: inspect the Vercel Git link; NoPager could not prove the linked repository identity.
+- `vercel_github_repository_mismatch`: select the Vercel project linked to the protected GitHub repository.
+- `vercel_production_branch_missing`: configure an explicit Vercel Production Branch.
+- `vercel_production_branch_mismatch`: align the Vercel Production Branch with the protected GitHub default branch.
+- `vercel_production_deployment_not_found`: create or promote a healthy current Production deployment and retry setup.
 - Preview creation reports sensitive-looking environment variables: replace Production-grade Preview credentials with non-production/least-privilege values, review the effective Preview environment, then set `NOPAGER_ALLOW_PREVIEW_SECRETS=true` and restart the Worker.
 - Preview environment metadata cannot be read: update the Vercel token/account permissions before relying on NoPager repair Preview.
 - Preview health returns Vercel authentication/protection instead of your app: configure `VERCEL_AUTOMATION_BYPASS_SECRET` as described above and restart the Worker.
 - Polling errors: inspect `docker compose logs -f worker` and confirm the access token still has access to the project.
+
+If Vercel provider state is ambiguous, do not bypass the setup or rollback gate. Fix the project/source configuration first.
