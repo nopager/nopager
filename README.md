@@ -12,7 +12,7 @@ The v0.1 Alpha supports one self-hosted administrator, one protected web app, Gi
 
 NoPager is for production software teams where founders and developers still carry on-call responsibility because a dedicated 24/7 SRE function is too expensive or unjustified.
 
-The goal is to make trustworthy production maintenance available before a team can justify hiring an SRE team—not to sell the cheapest possible model tokens. The open-source Alpha is self-hosted and BYOK so operators keep their existing GitHub, Vercel, and model-provider accounts while NoPager focuses on the response loop: context, repair, safety policy, verification, and rollback.
+The goal is to make trustworthy production maintenance available before a team can justify hiring an SRE team—not to sell the cheapest possible model tokens. The open-source Alpha is self-hosted and BYOK so operators keep their existing GitHub, Vercel, and model-provider accounts while NoPager focuses on the response loop: context, repair, safety policy, verification, rollback, and durable source recovery.
 
 Long term, NoPager can become an autonomous production control plane, but it should orchestrate mature infrastructure rather than rebuild it. See [Product principles](docs/PRODUCT_PRINCIPLES.md).
 
@@ -36,13 +36,14 @@ http://localhost:3000/setup
 
 For a real externally reachable installation, put the trusted HTTPS reverse proxy in place first and open the setup wizard through the **final public console origin** (for example `https://nopager.example.com/setup`) before starting automatic GitHub App setup. The GitHub Manifest flow intentionally uses the browser origin for its callback and workflow-run webhook. When setup is run from localhost, the generated GitHub webhook is created inactive because GitHub cannot deliver production events to a loopback URL.
 
-The setup wizard creates the local administrator and validates GitHub, Vercel, the model provider, the production health URL, and the selected safety mode before it stores the protected app. The recommended GitHub path uses GitHub App Manifest registration to create the least-privilege App without a central NoPager service; manual App credentials remain available as a fallback for organizations that disallow manifest registration. GitHub repository ID/default branch and canonical Vercel project metadata are discovered automatically. The AI step can load the models available to the supplied BYOK account and verifies the selected model with a small structured-output capability probe. The production step can safely probe common health endpoints before falling back to a manually entered URL.
+The setup wizard creates the local administrator and validates GitHub, Vercel, the model provider, the production health URL, and the selected safety mode before it stores the protected app. The recommended GitHub path uses GitHub App Manifest registration to create the least-privilege App without a central NoPager service; manual App credentials remain available as a fallback for organizations that disallow manifest registration. GitHub repository ID/default branch and canonical Vercel project metadata are discovered automatically. The Vercel connection is rejected if NoPager cannot prove that the selected project is linked to the same protected GitHub repository and explicit Production Branch. The AI step can load the models available to the supplied BYOK account and verifies the selected model with a small structured-output capability probe. The production step can safely probe common health endpoints before falling back to a manually entered URL.
 
 For setup and operations, see:
 
 - [Self-hosting and upgrade runbook](docs/SELF_HOSTING.md)
 - [GitHub App setup](docs/GITHUB_APP_SETUP.md)
 - [Vercel setup](docs/VERCEL_SETUP.md)
+- [First design partner owner checklist](docs/ALPHA_OWNER_CHECKLIST.md)
 
 The default Compose configuration binds **both** the web console and Rust API to `127.0.0.1`, so the first-admin bootstrap is not exposed to the network by default. For remote use, terminate TLS at a trusted reverse proxy and expose the web console deliberately; keep port 8080 private. Set `NOPAGER_WEB_BIND=0.0.0.0` only when your reverse-proxy/network topology requires a non-loopback host bind, and set `NOPAGER_COOKIE_SECURE=true` whenever the console is served through HTTPS.
 
@@ -68,7 +69,11 @@ Safe Mode is the default. NoPager may diagnose, repair, build, test, open a PR, 
 
 Autopilot is experimental and only permits low-risk, verified, reversible promotion. Enabling it in the console requires an explicit confirmation. A missing or failed Preview verification is a hard production block, not something that human approval can bypass. High-risk changes—including dependency manifests, database schema, IAM, DNS, billing, and secrets—are escalated. The Kill Switch pauses mutations while retaining read-only monitoring and evidence collection; resuming protection restarts paused incidents from fresh context instead of continuing stale mutation state.
 
-If production verification fails after a repair promotion, NoPager explicitly restores the previously recorded READY known-good Vercel deployment. It does not infer current traffic from Vercel's `target=production` field.
+A repair is not considered durably resolved merely because a promoted deployment became healthy. NoPager verifies that the repair lands in the protected GitHub source path, that the corresponding Git-driven deployment becomes the authoritative current Vercel Production target, and that production health passes before `RESOLVED`.
+
+If production verification fails **before** durable source landing, NoPager can restore the previously recorded known-good Vercel deployment. If production fails **after** the repair has already been merged into protected source, NoPager may restore traffic to the pre-incident known-good deployment, but the incident remains escalated while the failed source still exists. NoPager creates or surfaces a draft source-revert for human review and never auto-merges that revert. Final source recovery closes only after the reviewed revert is still the protected GitHub default-branch head, its corresponding Vercel deployment is authoritative current Production, and health passes the full verification window.
+
+Automatic rollback also refuses to overwrite an unrelated external Production deployment that took over after the incident began. NoPager does not infer current traffic from Vercel's `target=production` field alone.
 
 Repair execution uses a non-root, resource-limited, capability-dropped Docker container with a read-only root filesystem. Network access is disabled for build and test and is enabled only for recognized dependency-fetch commands. The trusted worker needs access to the Docker daemon; repair containers never receive the daemon socket or service credentials.
 
@@ -91,7 +96,12 @@ See [Code privacy and model boundary](docs/PRIVACY.md) for the exact current gua
 ```text
 Detect → Collect Context → Diagnose → Repair → Build/Test
        → GitHub PR → Vercel Preview → Verify → Approval/Policy
-       → Production → Watch → Resolve or Rollback
+       → Durable GitHub landing → Git-driven Production → Verify
+       → Resolve
+          or
+       → Traffic rollback → Escalate while source remains unsafe
+                         → Human-reviewed source revert
+                         → Re-verify GitHub + Vercel + health → Resolve
 ```
 
 Jobs and incident transitions are durable and idempotency-keyed in PostgreSQL. A failed validation is supplied to a fresh repair attempt; after the configured repair-attempt limit NoPager escalates instead of looping.
@@ -150,7 +160,12 @@ Copy `.env.example` to `.env`; never commit the populated file. `nopager doctor`
 For design-partner validation, use:
 
 - [Design Partner Alpha acceptance plan](docs/DESIGN_PARTNER_ALPHA.md)
+- [Alpha release gate](docs/ALPHA_RELEASE_GATE.md)
+- [First design partner owner checklist](docs/ALPHA_OWNER_CHECKLIST.md)
 - [60–90 second demo runbook](docs/DEMO_RUNBOOK.md)
+- [Real-provider dogfood checklist](https://github.com/nopager/nopager/issues/55)
+
+The real-provider dogfood checklist is the remaining Alpha release gate. Do not treat repository CI or a local demo as proof that external GitHub/Vercel/model-provider behavior has been proven.
 
 ## Alpha limitations
 
@@ -158,7 +173,8 @@ For design-partner validation, use:
 - One administrator and one protected app per OSS installation.
 - Preview verification uses HTTP health checks; browser verification is planned after Alpha.
 - Recommended GitHub setup uses GitHub App Manifest registration and repository-scoped installation; manual App ID/installation ID/private-key entry remains only as a fallback. Vercel access tokens and model-provider API keys are still BYOK/manual credentials. Team ID remains optional for personal Vercel projects, while repository/project metadata, provider model availability, and common health endpoints are discovered by the wizard.
-- External design-partner readiness still requires the real dogfood scenarios in the acceptance plan; CI alone is not treated as proof of safe production behavior.
+- External design-partner readiness still requires the real dogfood scenarios and durable rollback/source-recovery proof in the acceptance plan; CI alone is not treated as proof of safe production behavior.
+- External design partners should remain in Safe Mode for the Alpha. Autopilot is for controlled dogfood until the documented real-provider gate has repeatedly passed.
 - No Kubernetes, general observability backend, infrastructure provisioning, Team/RBAC/billing, or automatic high-risk database/IAM/DNS actions.
 
 ## Security and contributions
