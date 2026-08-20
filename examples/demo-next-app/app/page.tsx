@@ -7,6 +7,7 @@ export default function Home() {
         This deliberately small app provides deterministic deployment, runtime,
         and health-check failures for the NoPager repair loop.
       </p>
+      <p>Git-driven Preview verification probe 2.</p>
       <nav>
         <a href="/api/health">Health endpoint</a>
         <a href="/api/runtime-error">Runtime 500 fixture</a>
