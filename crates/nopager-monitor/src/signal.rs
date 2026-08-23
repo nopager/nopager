@@ -199,7 +199,8 @@ mod tests {
 
     #[test]
     fn normalizes_user_configured_identity_for_stable_keys() {
-        let resource = ProtectedResourceIdentity::new(" Generic Cloud ", "Service", "API / Primary");
+        let resource =
+            ProtectedResourceIdentity::new(" Generic Cloud ", "Service", "API / Primary");
         let signal = OperationalSignal::new(
             resource,
             OperationalSignalKind::HttpHealth,
