@@ -92,9 +92,7 @@ pub const fn decide_operations(
     match (context.mode, risk) {
         (SafetyMode::Safe, _) => PolicyDecision::RequireApproval,
         (SafetyMode::AutopilotExperimental, ActionRisk::Low) => PolicyDecision::Allow,
-        (SafetyMode::AutopilotExperimental, ActionRisk::Medium) => {
-            PolicyDecision::RequireApproval
-        }
+        (SafetyMode::AutopilotExperimental, ActionRisk::Medium) => PolicyDecision::RequireApproval,
         (_, ActionRisk::High | ActionRisk::Prohibited) => PolicyDecision::Block,
     }
 }
