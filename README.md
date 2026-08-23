@@ -1,20 +1,103 @@
 # NoPager
 
-**Your app breaks. You don't get paged.**
+**Production breaks. NoPager wakes up — not you.**
 
-NoPager is an open-source, agentless, BYOK AI on-call engineer for small production web teams. It detects incidents, gathers GitHub and Vercel evidence, proposes a narrowly scoped repair, validates it in an isolated Docker sandbox, creates a PR and Preview, and applies the configured production safety policy.
+NoPager is an open-source, incident-triggered **AI operations engineer** for small production teams.
 
-The v0.1 Alpha supports one self-hosted administrator, one protected web app, GitHub, Vercel, and one OpenAI, Anthropic, or Gemini API key.
+It is designed to keep lightweight monitoring active 24/7 and wake the AI reasoning/execution layer only when production evidence says something needs attention. The long-term goal is to absorb the routine and incident-driven work normally handled by an on-call operations/SRE engineer: detect, investigate, decide, act, verify, roll back when necessary, and keep watching.
 
-> **Design Partner Alpha:** the project is intentionally scope-frozen around proving one safe GitHub → Vercel repair loop with real production-like incidents. See [the Alpha acceptance plan](docs/DESIGN_PARTNER_ALPHA.md). This is not yet a claim of broad production readiness.
+NoPager is **not a GitHub or Vercel product**. GitHub + Vercel are the deliberately narrow first Alpha execution path used to prove one safe recovery loop with real provider behavior.
 
-## Who NoPager is for
+The intended operating model is:
 
-NoPager is for production software teams where founders and developers still carry on-call responsibility because a dedicated 24/7 SRE function is too expensive or unjustified.
+```text
+24/7 lightweight monitoring / provider events
+        → incident trigger
+        → wake AI operations reasoning
+        → gather cross-system evidence
+        → classify the cause
+        → choose the safest available action
+        → execute through existing provider APIs/tools
+        → verify recovery
+        → return to monitoring
+```
 
-The goal is to make trustworthy production maintenance available before a team can justify hiring an SRE team—not to sell the cheapest possible model tokens. The open-source Alpha is self-hosted and BYOK so operators keep their existing GitHub, Vercel, and model-provider accounts while NoPager focuses on the response loop: context, repair, safety policy, verification, rollback, and durable source recovery.
+The system should be quiet while production is healthy. Expensive model reasoning should not run continuously without need.
 
-Long term, NoPager can become an autonomous production control plane, but it should orchestrate mature infrastructure rather than rebuild it. See [Product principles](docs/PRODUCT_PRINCIPLES.md).
+> **Design Partner Alpha:** v0.1 is intentionally scope-frozen around proving one safe GitHub → Vercel repair/recovery loop. This is the first validation surface, not the final product boundary. See [the Alpha acceptance plan](docs/DESIGN_PARTNER_ALPHA.md).
+
+## What NoPager is trying to replace
+
+Small teams often reach a point where the product has real users but there is still no dedicated 24/7 operations/SRE function. The founder or developer becomes the person who must notice outages, inspect logs and recent changes, decide whether to restart, roll back, patch, scale, block traffic, or fail over, then verify that production is actually healthy again.
+
+NoPager's product thesis is that much of that operational work can be automated safely and far more cheaply than staffing a full-time on-call function.
+
+The target outcome is:
+
+- 24/7 production protection without a human watching dashboards all day;
+- fast incident triggering from provider events, health checks, metrics, and other cheap signals;
+- AI reasoning only when the situation requires it;
+- safe use of existing infrastructure APIs instead of rebuilding every underlying system;
+- automated verification after every action;
+- human approval or escalation when the action is high-risk, irreversible, or insufficiently understood.
+
+Fast detection and response are product goals. Recovery time still depends on the underlying infrastructure: an event may trigger quickly, while a deployment, failover, rollback, or verification window can take longer. NoPager should optimize each stage without claiming every incident can be resolved in milliseconds.
+
+## Operations surfaces
+
+NoPager should orchestrate mature infrastructure rather than reinvent it.
+
+The long-term execution/evidence graph can include:
+
+- **Linux / cloud compute** — service health, restart, capacity, failover, instance state;
+- **Cloudflare** — WAF, rate limits, bot/DDoS controls, cache, traffic policy, edge security;
+- **databases** — health, connections, backups, restore, replication, failover where safe APIs exist;
+- **observability** — metrics, logs, traces, alerts, incident evidence;
+- **deployment providers** — deploy, rollback, promotion, runtime state;
+- **GitHub and other source systems** — code evidence, review, repair delivery, durable source recovery;
+- **DNS, queues, storage, CDN and other production services** — through scoped provider APIs when an action can be made safe, reversible, and verifiable.
+
+A traffic spike, for example, should not mechanically trigger scaling. It could be legitimate growth, abuse, a bot wave, a recent regression, a cache failure, a database bottleneck, or a third-party outage. NoPager should gather evidence first, then decide whether to scale, change edge controls, roll back code, repair software, fail over, restart, or simply observe.
+
+**We orchestrate. We don't reinvent.**
+
+See [Product principles](docs/PRODUCT_PRINCIPLES.md).
+
+## Current v0.1 Alpha
+
+The current Alpha is intentionally much narrower than the product vision. It supports:
+
+- one self-hosted administrator;
+- one protected web app;
+- GitHub as the source/review surface;
+- Vercel as Preview and Production deployment provider;
+- one BYOK model provider: OpenAI, Anthropic, or Gemini;
+- a public HTTPS health check;
+- Safe Mode by default;
+- experimental Autopilot only for low-risk, verified, reversible actions.
+
+Today the concrete loop is:
+
+```text
+Detect → Collect Context → Diagnose → Repair → Build/Test
+       → GitHub PR → Vercel Preview → Verify → Approval/Policy
+       → Durable GitHub landing → Git-driven Production → Verify
+       → Resolve
+          or
+       → Traffic rollback → Escalate while source remains unsafe
+                         → Human-reviewed source revert
+                         → Re-verify GitHub + Vercel + health → Resolve
+```
+
+This Alpha exists to prove the safety model before adding Cloudflare, cloud/server control, databases, broader observability, security actions, and other production execution surfaces.
+
+## Why the AI is incident-triggered
+
+NoPager is not intended to be a heavyweight AI agent burning model tokens 24/7 or consuming significant resources on every protected application server.
+
+Continuous protection should use cheap deterministic mechanisms where possible: provider webhooks/events, health checks, metrics, bounded polling, and rule-based thresholds. When a meaningful incident is detected, NoPager wakes the AI layer, assembles the minimum necessary evidence, and starts incident reasoning.
+
+The current Alpha is self-hosted and has its own API/worker/web/PostgreSQL stack, but the protected application does not need a large model process running inside it. The long-term architecture should increasingly rely on scoped external provider APIs and event surfaces so operators can connect existing infrastructure rather than install invasive AI runtimes across production hosts.
 
 ## Quick start
 
@@ -26,7 +109,7 @@ cd nopager
 sh scripts/quickstart.sh
 ```
 
-The bootstrap script creates `.env` when needed, generates a random PostgreSQL password plus random 32-byte `NOPAGER_MASTER_KEY` and `NOPAGER_ADMIN_TOKEN` secrets, detects the Docker socket group on Linux, starts PostgreSQL/API/Worker/Web, and waits for the API plus web console to become ready. On a clean Git checkout it first tries to pull prebuilt amd64/arm64 application images for that exact Git commit from GitHub Container Registry; if those images are unavailable or the local source tree has been modified, it falls back to building locally. Existing Alpha installs keep their existing non-empty secrets, and the bootstrap recognizes the earlier fixed PostgreSQL credential so an existing volume is not silently made unbootable during upgrade.
+The bootstrap script creates `.env` when needed, generates a random PostgreSQL password plus random 32-byte `NOPAGER_MASTER_KEY` and `NOPAGER_ADMIN_TOKEN` secrets, detects the Docker socket group on Linux, starts PostgreSQL/API/Worker/Web, and waits for the API plus web console to become ready. On a clean Git checkout it first tries to pull prebuilt amd64/arm64 application images for that exact Git commit from GitHub Container Registry; if those images are unavailable or the local source tree has been modified, it falls back to building locally.
 
 For a local evaluation, open:
 
@@ -34,9 +117,9 @@ For a local evaluation, open:
 http://localhost:3000/setup
 ```
 
-For a real externally reachable installation, put the trusted HTTPS reverse proxy in place first and open the setup wizard through the **final public console origin** (for example `https://nopager.example.com/setup`) before starting automatic GitHub App setup. The GitHub Manifest flow intentionally uses the browser origin for its callback and workflow-run webhook. When setup is run from localhost, the generated GitHub webhook is created inactive because GitHub cannot deliver production events to a loopback URL.
+For a real externally reachable installation, put the trusted HTTPS reverse proxy in place first and open the setup wizard through the **final public console origin** before starting automatic GitHub App setup.
 
-The setup wizard creates the local administrator and validates GitHub, Vercel, the model provider, the production health URL, and the selected safety mode before it stores the protected app. The recommended GitHub path uses GitHub App Manifest registration to create the least-privilege App without a central NoPager service; manual App credentials remain available as a fallback for organizations that disallow manifest registration. GitHub repository ID/default branch and canonical Vercel project metadata are discovered automatically. The Vercel connection is rejected if NoPager cannot prove that the selected project is linked to the same protected GitHub repository and explicit Production Branch. The AI step can load the models available to the supplied BYOK account and verifies the selected model with a small structured-output capability probe. The production step can safely probe common health endpoints before falling back to a manually entered URL.
+The setup wizard creates the local administrator and validates GitHub, Vercel, the model provider, the production health URL, and the selected safety mode before it stores the protected app.
 
 For setup and operations, see:
 
@@ -45,13 +128,9 @@ For setup and operations, see:
 - [Vercel setup](docs/VERCEL_SETUP.md)
 - [First design partner owner checklist](docs/ALPHA_OWNER_CHECKLIST.md)
 
-The default Compose configuration binds **both** the web console and Rust API to `127.0.0.1`, so the first-admin bootstrap is not exposed to the network by default. For remote use, terminate TLS at a trusted reverse proxy and expose the web console deliberately; keep port 8080 private. Set `NOPAGER_WEB_BIND=0.0.0.0` only when your reverse-proxy/network topology requires a non-loopback host bind, and set `NOPAGER_COOKIE_SECURE=true` whenever the console is served through HTTPS.
+The default Compose configuration binds both the web console and Rust API to `127.0.0.1`. For remote use, terminate TLS at a trusted reverse proxy and expose the web console deliberately; keep port 8080 private.
 
-Console API responses are marked `private, no-store`; cross-origin browser mutations are rejected. The self-hosting runbook also calls out reverse-proxy rate limiting for login/bootstrap endpoints and the requirement to preserve the public `Host` header.
-
-Local process checks remain available on the host at `http://127.0.0.1:8080/healthz` and `/readyz`.
-
-The CLI automatically reads `.env`, so operator commands work without manually exporting the generated token:
+The CLI automatically reads `.env`:
 
 ```bash
 cargo run -p nopager-cli -- doctor
@@ -65,97 +144,52 @@ cargo run -p nopager-cli -- resume
 
 ## Safety model
 
-Safe Mode is the default. NoPager may diagnose, repair, build, test, open a PR, deploy a Preview, and verify it automatically; a production promotion waits for explicit administrator approval.
+Safe Mode is the default. In the current Alpha, NoPager may diagnose, repair, build, test, open a PR, deploy a Preview, and verify it automatically; a production promotion waits for explicit administrator approval.
 
-Autopilot is experimental and only permits low-risk, verified, reversible promotion. Enabling it in the console requires an explicit confirmation. A missing or failed Preview verification is a hard production block, not something that human approval can bypass. High-risk changes—including dependency manifests, database schema, IAM, DNS, billing, and secrets—are escalated. The Kill Switch pauses mutations while retaining read-only monitoring and evidence collection; resuming protection restarts paused incidents from fresh context instead of continuing stale mutation state.
+Autopilot is experimental and only permits low-risk, verified, reversible promotion. A missing or failed Preview verification is a hard production block. High-risk changes—including dependency manifests, database schema, IAM, DNS, billing, and secrets—are escalated.
 
-A repair is not considered durably resolved merely because a promoted deployment became healthy. NoPager verifies that the repair lands in the protected GitHub source path, that the corresponding Git-driven deployment becomes the authoritative current Vercel Production target, and that production health passes before `RESOLVED`.
+The same safety principle applies to future infrastructure operations: an AI action is not trusted because the model suggested it. It must be allowed by policy, narrowly scoped, reversible where practical, and followed by verification.
 
-If production verification fails **before** durable source landing, NoPager can restore the previously recorded known-good Vercel deployment. If production fails **after** the repair has already been merged into protected source, NoPager may restore traffic to the pre-incident known-good deployment, but the incident remains escalated while the failed source still exists. NoPager creates or surfaces a draft source-revert for human review and never auto-merges that revert. Final source recovery closes only after the reviewed revert is still the protected GitHub default-branch head, its corresponding Vercel deployment is authoritative current Production, and health passes the full verification window.
+A repair is not considered durably resolved merely because traffic becomes healthy. In the current GitHub/Vercel Alpha, NoPager verifies source and authoritative Production convergence before `RESOLVED`.
 
-Automatic rollback also refuses to overwrite an unrelated external Production deployment that took over after the incident began. NoPager does not infer current traffic from Vercel's `target=production` field alone.
+Automatic rollback refuses to overwrite an unrelated external Production deployment that took over after the incident began.
 
-Repair execution uses a non-root, resource-limited, capability-dropped Docker container with a read-only root filesystem. Network access is disabled for build and test and is enabled only for recognized dependency-fetch commands. The trusted worker needs access to the Docker daemon; repair containers never receive the daemon socket or service credentials.
+## Code and infrastructure privacy
 
-## Code privacy
+NoPager's privacy boundary is **minimum necessary incident context**.
 
-NoPager's privacy boundary is **minimum necessary incident context**, not "upload the repository and trust the model provider."
-
-The complete repository stays in the trusted self-hosted worker workspace for repair and validation. NoPager does **not** serialize the whole repository as a model prompt. External model calls receive bounded incident evidence such as verified recent GitHub diff context, stack traces, deployment metadata, and health evidence.
-
-Before any structured incident input is sent to the selected BYOK model provider, the provider boundary deterministically redacts secret-bearing JSON fields, private-key blocks, common credential assignments/token formats, and credentials embedded in URLs. Verified GitHub diff evidence is redacted before it is preserved for the repair stage.
-
-This is deliberately not marketed as "no source code ever leaves the machine": relevant code diffs can still be sent to the operator's selected OpenAI, Anthropic, or Gemini account. Provider retention/training terms are provider/account policy, not a cryptographic NoPager guarantee. Confidential inference/TEE and fully local or air-gapped inference are future high-assurance modes, not Alpha features.
+The current principle is:
 
 **The model doesn't need your repository. It needs the evidence.**
 
-See [Code privacy and model boundary](docs/PRIVACY.md) for the exact current guarantee.
+The complete repository stays in the trusted self-hosted worker workspace for repair and validation. NoPager does not serialize the whole repository as a model prompt. External model calls receive bounded incident evidence such as verified recent source diff context, stack traces, deployment metadata, and health evidence.
 
-## Incident lifecycle
+Before structured incident input is sent to the selected BYOK model provider, the provider boundary deterministically redacts secret-bearing JSON fields, private-key blocks, common credential assignments/token formats, and credentials embedded in URLs.
 
-```text
-Detect → Collect Context → Diagnose → Repair → Build/Test
-       → GitHub PR → Vercel Preview → Verify → Approval/Policy
-       → Durable GitHub landing → Git-driven Production → Verify
-       → Resolve
-          or
-       → Traffic rollback → Escalate while source remains unsafe
-                         → Human-reviewed source revert
-                         → Re-verify GitHub + Vercel + health → Resolve
-```
+As NoPager expands into infrastructure operations, the same rule applies to logs, metrics, cloud state, and security evidence: send the minimum context necessary to reason about the incident, not the entire account or environment.
 
-Jobs and incident transitions are durable and idempotency-keyed in PostgreSQL. A failed validation is supplied to a fresh repair attempt; after the configured repair-attempt limit NoPager escalates instead of looping.
-
-Production deployment failures can arrive through Vercel webhooks when available, but NoPager also polls the selected Vercel project approximately every 30 seconds. The polling path makes webhook support optional and uses deployment IDs for incident deduplication.
+See [Code privacy and model boundary](docs/PRIVACY.md).
 
 ## Architecture
 
 - `apps/server`: Rust HTTP API, webhook verification, local authentication, and setup.
 - `apps/worker`: Rust durable job processor and the end-to-end incident workflow.
-- `apps/cli`: Rust self-hosting CLI (`init`, `doctor`, `status`, `protect`, `incidents`, `logs`, `pause`, `resume`).
-- `apps/web`: Next.js operations console and the public signed-webhook proxy.
+- `apps/cli`: Rust self-hosting CLI.
+- `apps/web`: Next.js operations console and public signed-webhook proxy.
 - `crates/*`: Rust domain, database, provider, connector, monitoring, policy, cryptography, webhook, and sandbox modules.
 - PostgreSQL: durable configuration, incidents, audit events, deployments, attempts, and jobs.
 
 See [the Rust-first architecture decision](docs/architecture/0001-rust-first.md).
 
-## Webhooks
+## Current monitoring and triggers
 
-The public webhook URLs are on the same origin as the web console:
+Production deployment failures can arrive through Vercel webhooks when available. The current Alpha also polls the selected Vercel project approximately every 30 seconds and uses deployment IDs for incident deduplication.
 
-```text
-https://YOUR_NOPAGER_HOST/api/webhooks/github
-https://YOUR_NOPAGER_HOST/api/webhooks/vercel
-```
-
-The Next.js routes forward only the provider headers needed for signature validation plus the raw request body to the private Rust API. GitHub webhook verification is part of the standard Alpha setup. The Vercel webhook is optional because REST polling remains active as a fallback.
-
-## Local development
-
-Requirements: Rust 1.92, Node.js 22, pnpm 10, PostgreSQL 17, and Docker for sandbox execution.
-
-```bash
-pnpm install --frozen-lockfile
-pnpm format:check
-pnpm lint
-pnpm typecheck
-pnpm test
-pnpm build
-```
-
-Run services individually with:
-
-```bash
-cargo run -p nopager-server
-cargo run -p nopager-worker
-pnpm --filter @nopager/web dev
-```
-
-Copy `.env.example` to `.env`; never commit the populated file. `nopager doctor` checks Docker/Compose, local secret configuration, and API/PostgreSQL readiness.
+This is an Alpha implementation detail, not the latency target for the mature product. Future provider integrations should prefer event-driven triggers wherever reliable provider events exist, with bounded polling as a fallback.
 
 ## Dogfood demo
 
-[`examples/demo-next-app`](examples/demo-next-app) is a deliberately breakable Next.js target for the public Alpha demonstration. It provides a healthy endpoint, deterministic runtime 500, health-check and recent-regression modes, and a deterministic deployment build failure. Its README documents how to inject and restore each scenario before exercising the GitHub → Vercel repair loop.
+[`examples/demo-next-app`](examples/demo-next-app) is a deliberately breakable Next.js target for the public Alpha demonstration. It provides a healthy endpoint, deterministic runtime 500, health-check and recent-regression modes, and a deterministic deployment build failure.
 
 For design-partner validation, use:
 
@@ -165,24 +199,25 @@ For design-partner validation, use:
 - [60–90 second demo runbook](docs/DEMO_RUNBOOK.md)
 - [Real-provider dogfood checklist](https://github.com/nopager/nopager/issues/55)
 
-The real-provider dogfood checklist is the remaining Alpha release gate. Do not treat repository CI or a local demo as proof that external GitHub/Vercel/model-provider behavior has been proven.
+The real-provider dogfood checklist is the remaining Alpha release gate. Do not treat repository CI or a local demo as proof that external provider behavior has been proven.
 
 ## Alpha limitations
 
-- GitHub and Vercel are the only production connectors.
+- GitHub and Vercel are the only current production connectors.
 - One administrator and one protected app per OSS installation.
-- Preview verification uses HTTP health checks; browser verification is planned after Alpha.
-- Recommended GitHub setup uses GitHub App Manifest registration and repository-scoped installation; manual App ID/installation ID/private-key entry remains only as a fallback. Vercel access tokens and model-provider API keys are still BYOK/manual credentials. Team ID remains optional for personal Vercel projects, while repository/project metadata, provider model availability, and common health endpoints are discovered by the wizard.
-- External design-partner readiness still requires the real dogfood scenarios and durable rollback/source-recovery proof in the acceptance plan; CI alone is not treated as proof of safe production behavior.
-- External design partners should remain in Safe Mode for the Alpha. Autopilot is for controlled dogfood until the documented real-provider gate has repeatedly passed.
-- No Kubernetes, general observability backend, infrastructure provisioning, Team/RBAC/billing, or automatic high-risk database/IAM/DNS actions.
+- Preview verification uses HTTP health checks.
+- External design-partner readiness still requires the real dogfood scenarios and durable rollback/source-recovery proof in the acceptance plan.
+- External design partners should remain in Safe Mode for the Alpha.
+- Cloudflare, general Linux/cloud operations, Kubernetes, broad observability backends, database operations, Team/RBAC/billing, and automatic high-risk IAM/DNS actions are not current Alpha features.
+
+These limitations describe v0.1. They do not define NoPager's long-term category.
 
 ## Security and contributions
 
 Read [SECURITY.md](SECURITY.md) and [Code privacy](docs/PRIVACY.md) before reporting a vulnerability, and [CONTRIBUTING.md](CONTRIBUTING.md) before opening a change. Never include production credentials, full logs containing secrets, or customer data in issues.
 
-Back up `.env` together with PostgreSQL. Losing `NOPAGER_MASTER_KEY` makes encrypted integration credentials unrecoverable; do not rotate it casually as a troubleshooting step.
+Back up `.env` together with PostgreSQL. Losing `NOPAGER_MASTER_KEY` makes encrypted integration credentials unrecoverable.
 
 ## License
 
-AGPL-3.0-or-later. See [LICENSE](LICENSE). Formal commercial use should include counsel review as called out in the product baseline.
+AGPL-3.0-or-later. See [LICENSE](LICENSE).
