@@ -7,6 +7,8 @@ use ipnet::IpNet;
 use thiserror::Error;
 use url::{Host, Url};
 
+pub mod signal;
+
 const VERCEL_BYPASS_ENV: &str = "VERCEL_AUTOMATION_BYPASS_SECRET";
 const VERCEL_BYPASS_HEADER: &str = "x-vercel-protection-bypass";
 
