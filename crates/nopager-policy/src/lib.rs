@@ -1,4 +1,3 @@
-use nopager_core::OperationsAction;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,25 +35,15 @@ pub struct PolicyContext {
 
 #[must_use]
 pub const fn decide(risk: ActionRisk, context: PolicyContext) -> PolicyDecision {
-    // A kill switch or a high/prohibited action is a hard stop. Human approval
-    // must never turn these into a production mutation.
     if context.kill_switch_active || matches!(risk, ActionRisk::High | ActionRisk::Prohibited) {
         return PolicyDecision::Block;
     }
-
-    // Preview verification is a mandatory production safety gate. A failed or
-    // missing preview must stop the rollout rather than merely ask for approval.
     if !context.preview_verified {
         return PolicyDecision::Block;
     }
-
-    // A repair without a known rollback target is never allowed to promote
-    // automatically. Safe Mode already requires approval for every production
-    // mutation; Autopilot falls back to the same requirement here.
     if !context.reversible {
         return PolicyDecision::RequireApproval;
     }
-
     match (context.mode, risk) {
         (SafetyMode::Safe, _) | (_, ActionRisk::Medium) => PolicyDecision::RequireApproval,
         (SafetyMode::AutopilotExperimental, ActionRisk::Low) => PolicyDecision::Allow,
@@ -64,9 +53,8 @@ pub const fn decide(risk: ActionRisk, context: PolicyContext) -> PolicyDecision 
 
 /// Deterministic safety facts for a non-deployment production operation.
 ///
-/// None of these values are supplied by the model. They come from trusted
-/// configuration, connector capability discovery, the Kill Switch and action
-/// history.
+/// These values come from trusted configuration, connector capability
+/// discovery, the Kill Switch and action history, never from the model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OperationsPolicyContext {
     pub mode: SafetyMode,
@@ -77,30 +65,17 @@ pub struct OperationsPolicyContext {
     pub cooldown_clear: bool,
 }
 
-/// Risk is assigned by NoPager code, not by the model.
-#[must_use]
-pub const fn operations_action_risk(action: &OperationsAction) -> ActionRisk {
-    match action {
-        OperationsAction::ObserveOnly | OperationsAction::Escalate { .. } => ActionRisk::Low,
-        OperationsAction::RestartService { .. } | OperationsAction::RestartContainer { .. } => {
-            ActionRisk::Low
-        }
-        OperationsAction::RestartInstance { .. } => ActionRisk::Medium,
-    }
-}
-
-/// Decide whether one typed operations action may run.
+/// Decide whether one already-validated typed operations action may run.
 ///
-/// Read-only/no-op choices are always allowed. A mutation is blocked if its
-/// configured target, capability, independent verification or cooldown is not
-/// proven by trusted code. Safe Mode requires approval for every mutation;
-/// experimental Autopilot may execute only the low-risk subset automatically.
+/// The caller derives `risk` and `mutating` from a trusted action enum. The
+/// model never supplies either value directly.
 #[must_use]
 pub const fn decide_operations(
-    action: &OperationsAction,
+    risk: ActionRisk,
+    mutating: bool,
     context: OperationsPolicyContext,
 ) -> PolicyDecision {
-    if !action.is_mutating() {
+    if !mutating {
         return PolicyDecision::Allow;
     }
 
@@ -109,17 +84,18 @@ pub const fn decide_operations(
         || !context.action_enabled
         || !context.verification_configured
         || !context.cooldown_clear
+        || matches!(risk, ActionRisk::High | ActionRisk::Prohibited)
     {
         return PolicyDecision::Block;
     }
 
-    match (context.mode, operations_action_risk(action)) {
-        (_, ActionRisk::High | ActionRisk::Prohibited) => PolicyDecision::Block,
+    match (context.mode, risk) {
         (SafetyMode::Safe, _) => PolicyDecision::RequireApproval,
         (SafetyMode::AutopilotExperimental, ActionRisk::Low) => PolicyDecision::Allow,
         (SafetyMode::AutopilotExperimental, ActionRisk::Medium) => {
             PolicyDecision::RequireApproval
         }
+        (_, ActionRisk::High | ActionRisk::Prohibited) => PolicyDecision::Block,
     }
 }
 
@@ -225,47 +201,38 @@ mod tests {
 
     #[test]
     fn operations_safe_mode_requires_approval_for_restart() {
-        let action = OperationsAction::RestartService {
-            target_id: "api".into(),
-        };
         assert_eq!(
-            decide_operations(&action, operations_context()),
+            decide_operations(ActionRisk::Low, true, operations_context()),
             PolicyDecision::RequireApproval
         );
     }
 
     #[test]
-    fn operations_autopilot_allows_bounded_service_restart() {
-        let action = OperationsAction::RestartService {
-            target_id: "api".into(),
-        };
-        let context = OperationsPolicyContext {
-            mode: SafetyMode::AutopilotExperimental,
-            ..operations_context()
-        };
-        assert_eq!(decide_operations(&action, context), PolicyDecision::Allow);
-    }
-
-    #[test]
-    fn instance_restart_still_requires_approval_in_autopilot() {
-        let action = OperationsAction::RestartInstance {
-            target_id: "vm-primary".into(),
-        };
+    fn operations_autopilot_allows_bounded_low_risk_restart() {
         let context = OperationsPolicyContext {
             mode: SafetyMode::AutopilotExperimental,
             ..operations_context()
         };
         assert_eq!(
-            decide_operations(&action, context),
+            decide_operations(ActionRisk::Low, true, context),
+            PolicyDecision::Allow
+        );
+    }
+
+    #[test]
+    fn medium_risk_instance_action_still_requires_approval_in_autopilot() {
+        let context = OperationsPolicyContext {
+            mode: SafetyMode::AutopilotExperimental,
+            ..operations_context()
+        };
+        assert_eq!(
+            decide_operations(ActionRisk::Medium, true, context),
             PolicyDecision::RequireApproval
         );
     }
 
     #[test]
     fn missing_verification_or_cooldown_blocks_restart() {
-        let action = OperationsAction::RestartContainer {
-            target_id: "web".into(),
-        };
         for context in [
             OperationsPolicyContext {
                 verification_configured: false,
@@ -280,12 +247,15 @@ mod tests {
                 ..operations_context()
             },
         ] {
-            assert_eq!(decide_operations(&action, context), PolicyDecision::Block);
+            assert_eq!(
+                decide_operations(ActionRisk::Low, true, context),
+                PolicyDecision::Block
+            );
         }
     }
 
     #[test]
-    fn observe_and_escalate_never_mutate_production() {
+    fn read_only_or_escalation_path_is_allowed_while_mutations_are_blocked() {
         let blocked_context = OperationsPolicyContext {
             kill_switch_active: true,
             target_configured: false,
@@ -295,16 +265,7 @@ mod tests {
             ..operations_context()
         };
         assert_eq!(
-            decide_operations(&OperationsAction::ObserveOnly, blocked_context),
-            PolicyDecision::Allow
-        );
-        assert_eq!(
-            decide_operations(
-                &OperationsAction::Escalate {
-                    reason: "insufficient evidence".into(),
-                },
-                blocked_context,
-            ),
+            decide_operations(ActionRisk::Low, false, blocked_context),
             PolicyDecision::Allow
         );
     }
