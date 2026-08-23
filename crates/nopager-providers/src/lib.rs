@@ -59,8 +59,12 @@ pub trait ModelProvider: Send + Sync {
     async fn propose_patch(&self, input: &RepairInput) -> Result<RepairProposal, ProviderError>;
     async fn plan_operations(
         &self,
-        input: &OperationsInput,
-    ) -> Result<OperationsDecision, ProviderError>;
+        _input: &OperationsInput,
+    ) -> Result<OperationsDecision, ProviderError> {
+        Err(ProviderError::Request(
+            "operations planning is unavailable for this provider wrapper".into(),
+        ))
+    }
 }
 
 pub async fn discover_available_models(
