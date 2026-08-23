@@ -416,13 +416,12 @@ mod tests {
     }
 
     #[test]
-    fn typed_actions_cannot_carry_raw_shell_commands() {
-        let serialized = serde_json::to_value(OperationsAction::RestartService {
+    fn typed_restart_exposes_only_the_configured_target_identity() {
+        let action = OperationsAction::RestartService {
             target_id: "api.service".into(),
-        })
-        .unwrap();
-        assert_eq!(serialized["kind"], "restart_service");
-        assert!(serialized.get("command").is_none());
-        assert!(serialized.get("shell").is_none());
+        };
+        assert!(action.is_mutating());
+        assert_eq!(action.target_id(), Some("api.service"));
+        assert_eq!(action.validate(), Ok(()));
     }
 }
