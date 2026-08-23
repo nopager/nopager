@@ -6,7 +6,7 @@ NoPager is an open-source, incident-triggered **AI operations engineer** for sma
 
 It is designed to keep lightweight monitoring active 24/7 and wake the AI reasoning/execution layer only when production evidence says something needs attention. The long-term goal is to absorb the routine and incident-driven work normally handled by an on-call operations/SRE engineer: detect, investigate, decide, act, verify, roll back when necessary, and keep watching.
 
-NoPager is **not a GitHub or Vercel product**. GitHub + Vercel are the deliberately narrow first Alpha execution path used to prove one safe recovery loop with real provider behavior.
+NoPager is **not a GitHub or Vercel product**. The current GitHub + Vercel work is a **deployment-recovery subsystem**. It exercises code/deployment incident handling, but it is not the server-operations product and it is not evidence that NoPager already performs general server, network, edge-security, database, or capacity operations.
 
 The intended operating model is:
 
@@ -24,11 +24,11 @@ The intended operating model is:
 
 The system should be quiet while production is healthy. Expensive model reasoning should not run continuously without need.
 
-> **Design Partner Alpha:** v0.1 is intentionally scope-frozen around proving one safe GitHub → Vercel repair/recovery loop. This is the first validation surface, not the final product boundary. See [the Alpha acceptance plan](docs/DESIGN_PARTNER_ALPHA.md).
+> **Current v0.1 deployment-recovery Alpha:** the existing Alpha is scope-frozen around one GitHub → Vercel repair/recovery loop. That work validates reusable incident/safety machinery for deployment failures. It does **not** validate the broader server-operations promise. See [the Alpha acceptance plan](docs/DESIGN_PARTNER_ALPHA.md).
 
 ## What NoPager is trying to replace
 
-Small teams often reach a point where the product has real users but there is still no dedicated 24/7 operations/SRE function. The founder or developer becomes the person who must notice outages, inspect logs and recent changes, decide whether to restart, roll back, patch, scale, block traffic, or fail over, then verify that production is actually healthy again.
+Small teams often reach a point where the product has real users but there is still no dedicated 24/7 operations/SRE function. The founder or developer becomes the person who must notice outages, inspect logs and recent changes, decide whether to restart, roll back, patch, scale, block traffic, fail over, change edge controls, or recover infrastructure, then verify that production is actually healthy again.
 
 NoPager's product thesis is that much of that operational work can be automated safely and far more cheaply than staffing a full-time on-call function.
 
@@ -41,7 +41,7 @@ The target outcome is:
 - automated verification after every action;
 - human approval or escalation when the action is high-risk, irreversible, or insufficiently understood.
 
-Fast detection and response are product goals. Recovery time still depends on the underlying infrastructure: an event may trigger quickly, while a deployment, failover, rollback, or verification window can take longer. NoPager should optimize each stage without claiming every incident can be resolved in milliseconds.
+Fast detection and response are product goals. Recovery time still depends on the underlying infrastructure: an event may trigger quickly, while a restart, failover, rollback, deployment, or verification window can take longer. NoPager should optimize each stage without claiming every incident can be resolved in milliseconds.
 
 ## Operations surfaces
 
@@ -63,9 +63,13 @@ A traffic spike, for example, should not mechanically trigger scaling. It could 
 
 See [Product principles](docs/PRODUCT_PRINCIPLES.md).
 
-## Current v0.1 Alpha
+## Product proof vs. deployment proof
 
-The current Alpha is intentionally much narrower than the product vision. It supports:
+There are two different things in this repository and they must not be conflated.
+
+### 1. Deployment-recovery proof — current v0.1
+
+The current implemented Alpha covers a deliberately narrow code/deployment path:
 
 - one self-hosted administrator;
 - one protected web app;
@@ -76,20 +80,37 @@ The current Alpha is intentionally much narrower than the product vision. It sup
 - Safe Mode by default;
 - experimental Autopilot only for low-risk, verified, reversible actions.
 
-Today the concrete loop is:
+Its concrete loop is:
 
 ```text
-Detect → Collect Context → Diagnose → Repair → Build/Test
+Detect deployment/runtime regression → Collect Context → Diagnose → Repair → Build/Test
        → GitHub PR → Vercel Preview → Verify → Approval/Policy
        → Durable GitHub landing → Git-driven Production → Verify
        → Resolve
           or
-       → Traffic rollback → Escalate while source remains unsafe
-                         → Human-reviewed source revert
-                         → Re-verify GitHub + Vercel + health → Resolve
+       → Deployment rollback → Escalate while source remains unsafe
+                             → Human-reviewed source revert
+                             → Re-verify GitHub + Vercel + health → Resolve
 ```
 
-This Alpha exists to prove the safety model before adding Cloudflare, cloud/server control, databases, broader observability, security actions, and other production execution surfaces.
+This is **deployment operations**. It is useful, but it is only one class of operations work.
+
+### 2. Server/production-operations proof — separate product milestone
+
+The broader NoPager product must be validated separately against real operational incidents that do not depend on a GitHub commit or Vercel deployment failure.
+
+Examples include:
+
+- a service or process becomes unhealthy and requires controlled restart/recovery;
+- sustained CPU, memory, disk, connection, or capacity pressure requires diagnosis before action;
+- a traffic spike must be classified as growth, abuse, bot traffic, cache failure, or application regression;
+- Cloudflare WAF/rate-limit/traffic controls need to change in response to verified abusive traffic;
+- infrastructure needs failover, traffic steering, cache action, or another provider-native recovery step;
+- the application is unhealthy while source code and the latest deployment are unchanged.
+
+That server/production-operations milestone must prove the same core contract: **trigger → gather evidence → reason → act through scoped provider APIs → verify recovery → roll back/escalate if needed**.
+
+The GitHub/Vercel Alpha can validate shared safety primitives such as incident state, policy, auditability, idempotency, verification, and rollback discipline. It cannot be presented as proof that general server operations already work.
 
 ## Why the AI is incident-triggered
 
@@ -144,13 +165,13 @@ cargo run -p nopager-cli -- resume
 
 ## Safety model
 
-Safe Mode is the default. In the current Alpha, NoPager may diagnose, repair, build, test, open a PR, deploy a Preview, and verify it automatically; a production promotion waits for explicit administrator approval.
+Safe Mode is the default. In the current deployment-recovery Alpha, NoPager may diagnose, repair, build, test, open a PR, deploy a Preview, and verify it automatically; a production promotion waits for explicit administrator approval.
 
 Autopilot is experimental and only permits low-risk, verified, reversible promotion. A missing or failed Preview verification is a hard production block. High-risk changes—including dependency manifests, database schema, IAM, DNS, billing, and secrets—are escalated.
 
 The same safety principle applies to future infrastructure operations: an AI action is not trusted because the model suggested it. It must be allowed by policy, narrowly scoped, reversible where practical, and followed by verification.
 
-A repair is not considered durably resolved merely because traffic becomes healthy. In the current GitHub/Vercel Alpha, NoPager verifies source and authoritative Production convergence before `RESOLVED`.
+A repair is not considered durably resolved merely because traffic becomes healthy. In the current GitHub/Vercel deployment-recovery Alpha, NoPager verifies source and authoritative Production convergence before `RESOLVED`.
 
 Automatic rollback refuses to overwrite an unrelated external Production deployment that took over after the incident began.
 
@@ -183,15 +204,15 @@ See [the Rust-first architecture decision](docs/architecture/0001-rust-first.md)
 
 ## Current monitoring and triggers
 
-Production deployment failures can arrive through Vercel webhooks when available. The current Alpha also polls the selected Vercel project approximately every 30 seconds and uses deployment IDs for incident deduplication.
+The currently implemented GitHub/Vercel deployment-recovery module can receive production deployment failures through Vercel webhooks when available. It also polls the selected Vercel project approximately every 30 seconds and uses deployment IDs for incident deduplication.
 
-This is an Alpha implementation detail, not the latency target for the mature product. Future provider integrations should prefer event-driven triggers wherever reliable provider events exist, with bounded polling as a fallback.
+That polling loop is **not** the monitoring design or latency benchmark for the future server-operations product. Real server/edge/cloud protection should prefer provider-native events, metrics, health signals, and low-overhead external monitoring, with bounded polling only where needed.
 
 ## Dogfood demo
 
-[`examples/demo-next-app`](examples/demo-next-app) is a deliberately breakable Next.js target for the public Alpha demonstration. It provides a healthy endpoint, deterministic runtime 500, health-check and recent-regression modes, and a deterministic deployment build failure.
+[`examples/demo-next-app`](examples/demo-next-app) is a deliberately breakable Next.js target for the **deployment-recovery Alpha demonstration**. It provides a healthy endpoint, deterministic runtime 500, health-check and recent-regression modes, and a deterministic deployment build failure.
 
-For design-partner validation, use:
+For deployment-recovery validation, use:
 
 - [Design Partner Alpha acceptance plan](docs/DESIGN_PARTNER_ALPHA.md)
 - [Alpha release gate](docs/ALPHA_RELEASE_GATE.md)
@@ -199,18 +220,18 @@ For design-partner validation, use:
 - [60–90 second demo runbook](docs/DEMO_RUNBOOK.md)
 - [Real-provider dogfood checklist](https://github.com/nopager/nopager/issues/55)
 
-The real-provider dogfood checklist is the remaining Alpha release gate. Do not treat repository CI or a local demo as proof that external provider behavior has been proven.
+The real-provider dogfood checklist is the remaining gate for that deployment-recovery subsystem. Do not treat it as proof of broader server/production operations.
 
-## Alpha limitations
+## Current limitations
 
-- GitHub and Vercel are the only current production connectors.
+- GitHub and Vercel are the only currently implemented production connectors, and they cover deployment/source recovery rather than general server operations.
 - One administrator and one protected app per OSS installation.
 - Preview verification uses HTTP health checks.
-- External design-partner readiness still requires the real dogfood scenarios and durable rollback/source-recovery proof in the acceptance plan.
-- External design partners should remain in Safe Mode for the Alpha.
-- Cloudflare, general Linux/cloud operations, Kubernetes, broad observability backends, database operations, Team/RBAC/billing, and automatic high-risk IAM/DNS actions are not current Alpha features.
+- External deployment-recovery design-partner readiness still requires the real dogfood scenarios and durable rollback/source-recovery proof in the acceptance plan.
+- External design partners should remain in Safe Mode for that Alpha.
+- Cloudflare, general Linux/cloud operations, Kubernetes, broad observability backends, database operations, Team/RBAC/billing, and automatic high-risk IAM/DNS actions are not current features.
 
-These limitations describe v0.1. They do not define NoPager's long-term category.
+These limitations describe the code that exists today. They do not define NoPager's product category.
 
 ## Security and contributions
 
