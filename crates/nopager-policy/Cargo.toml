@@ -7,5 +7,4 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-nopager-core = { path = "../nopager-core" }
 serde.workspace = true
