@@ -279,7 +279,10 @@ impl OperationsPlan {
     }
 }
 
-fn validate_bounded_identifier(value: &str, field: &'static str) -> Result<(), OperationsPlanError> {
+fn validate_bounded_identifier(
+    value: &str,
+    field: &'static str,
+) -> Result<(), OperationsPlanError> {
     let trimmed = value.trim();
     if trimmed.is_empty()
         || trimmed.len() > 256
@@ -368,7 +371,10 @@ mod tests {
             verification: None,
             rollback_or_fallback: "escalate if restart does not restore health".into(),
         };
-        assert_eq!(plan.validate(), Err(OperationsPlanError::MissingVerification));
+        assert_eq!(
+            plan.validate(),
+            Err(OperationsPlanError::MissingVerification)
+        );
     }
 
     #[test]
