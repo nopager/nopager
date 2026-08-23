@@ -1,6 +1,6 @@
 # NoPager product principles
 
-This document separates the durable product thesis from the deliberately narrow v0.1 Alpha scope.
+This document separates the durable product thesis from the currently implemented deployment-recovery Alpha.
 
 ## What NoPager is
 
@@ -28,25 +28,68 @@ The intended operating loop is:
 
 NoPager should behave more like an on-call operations engineer than a coding assistant: it is **event-driven by production conditions**, not primarily driven by a human prompt.
 
-## What NoPager is not
+## Deployment recovery is one subsystem, not the product category
 
-NoPager is not defined by GitHub or Vercel.
+GitHub + Vercel are not the NoPager product definition.
 
-GitHub and Vercel are the first Alpha connectors because they provide a narrow, testable path for proving safe diagnosis, repair, verification, approval, rollback, and durable recovery. They are implementation surfaces for the first proof, not the product category.
+The currently implemented v0.1 path is a **deployment-recovery subsystem**. It handles one class of production failure where source changes and deployment state are central to diagnosis and recovery.
+
+That subsystem can prove reusable engineering properties such as:
+
+- durable incident state;
+- evidence collection;
+- bounded AI reasoning;
+- policy-gated mutation;
+- idempotent execution;
+- verification after action;
+- rollback discipline;
+- auditability and human approval boundaries.
+
+It does **not** prove that NoPager already performs general server operations. A successful GitHub PR → Vercel Preview → Production recovery flow is still deployment operations, not evidence that NoPager can diagnose CPU pressure, restart a failed process, mitigate abusive traffic through Cloudflare, fail over infrastructure, repair a database condition, or handle a server incident unrelated to a deployment.
 
 NoPager is also not intended to become a heavy AI process installed on every protected server. The durable direction is a low-overhead control plane that uses provider events, health signals, scoped APIs, and existing infrastructure primitives wherever practical. Expensive model reasoning should be invoked when an incident requires it rather than running continuously without need.
 
-## What the Alpha proves
+## What the current deployment-recovery Alpha proves
 
-The first proof is intentionally small:
+The current proof is intentionally narrow:
 
-> Can a stranger connect one real GitHub + Vercel app, let NoPager detect a supported incident, receive a tested repair and healthy Preview, approve the production action, and see the service recover without unsafe behavior?
-
-Until that is repeatable, broader infrastructure automation is a distraction.
+> Can a stranger connect one real GitHub + Vercel app, let NoPager detect a supported code/deployment incident, receive a tested repair and healthy Preview, approve the production action, and see the deployment recover without unsafe behavior?
 
 The Alpha therefore remains self-hosted, single-admin, single-app, GitHub + Vercel, BYOK, with Safe Mode as the default.
 
-This Alpha scope must never be confused with the long-term product definition.
+Passing this gate matters, but it validates the **deployment-recovery subsystem and shared safety machinery only**. It must never be presented as proof of the broader server/production-operations product.
+
+## The separate server/production-operations proof
+
+The central product thesis needs a separate real-world validation milestone in which the incident is operational rather than primarily a source/deployment regression.
+
+That proof should cover cases such as:
+
+- service/process health failure requiring controlled restart or recovery;
+- CPU, memory, disk, connection, or capacity pressure that requires diagnosis before action;
+- elevated 5xx/latency with no new source commit or deployment to blame;
+- traffic anomalies that must be classified as real growth, abuse, bots, attack traffic, cache failure, or application regression;
+- Cloudflare WAF/rate-limit/bot/traffic actions based on verified evidence;
+- cloud/server restart, failover, scaling, traffic steering, or other provider-native recovery actions;
+- database or dependency health incidents where safe provider primitives exist;
+- incidents where the correct action is to observe or escalate rather than mutate anything.
+
+The server/production-operations proof must demonstrate:
+
+```text
+cheap always-on signal
+        → incident trigger
+        → wake AI
+        → collect cross-system operational evidence
+        → classify cause
+        → choose an allowed provider-native action
+        → execute with scoped credentials
+        → verify recovery
+        → undo/escalate if the action fails
+        → return to monitoring
+```
+
+This is the product proof that begins validating NoPager as an AI replacement for routine on-call operations work.
 
 ## Long-term category: Autonomous Production Operations
 
@@ -80,7 +123,7 @@ Continuous protection should rely on cheap signals and deterministic machinery w
 
 When a meaningful incident is detected, NoPager should wake the AI layer immediately, assemble the minimum necessary evidence, and begin incident reasoning and response.
 
-Fast detection and fast response are product goals, but recovery time is bounded by the underlying infrastructure. A provider event may arrive in milliseconds or seconds, while a deployment, database failover, rollback, or health-verification window can take longer. NoPager should optimize every stage without making false claims that every incident can be resolved in milliseconds.
+Fast detection and fast response are product goals, but recovery time is bounded by the underlying infrastructure. A provider event may arrive in milliseconds or seconds, while a restart, deployment, database failover, rollback, or health-verification window can take longer. NoPager should optimize every stage without making false claims that every incident can be resolved in milliseconds.
 
 ## Decision before action
 
@@ -119,7 +162,7 @@ The current principle is:
 
 **The model doesn't need your repository. It needs the evidence.**
 
-The full repository stays in the trusted self-hosted repair workspace in the current Alpha. External model calls receive bounded incident evidence after deterministic secret redaction. Relevant code diffs can still leave the host through the customer's selected BYOK model provider, so NoPager must describe that boundary precisely.
+The full repository stays in the trusted self-hosted repair workspace in the current deployment-recovery Alpha. External model calls receive bounded incident evidence after deterministic secret redaction. Relevant code diffs can still leave the host through the customer's selected BYOK model provider, so NoPager must describe that boundary precisely.
 
 As NoPager expands beyond code repair, the same minimum-necessary-evidence principle applies to infrastructure data: do not send entire logs, account inventories, or unrelated production state to a model when a bounded incident context is sufficient.
 
