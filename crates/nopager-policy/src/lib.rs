@@ -23,6 +23,8 @@ pub enum PolicyDecision {
     Block,
 }
 
+/// Deployment-recovery policy context retained for the v0.1 GitHub/Vercel
+/// subsystem. Server/edge operations use [`OperationsPolicyContext`] instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PolicyContext {
     pub mode: SafetyMode,
@@ -33,28 +35,64 @@ pub struct PolicyContext {
 
 #[must_use]
 pub const fn decide(risk: ActionRisk, context: PolicyContext) -> PolicyDecision {
-    // A kill switch or a high/prohibited action is a hard stop. Human approval
-    // must never turn these into a production mutation.
     if context.kill_switch_active || matches!(risk, ActionRisk::High | ActionRisk::Prohibited) {
         return PolicyDecision::Block;
     }
-
-    // Preview verification is a mandatory production safety gate. A failed or
-    // missing preview must stop the rollout rather than merely ask for approval.
     if !context.preview_verified {
         return PolicyDecision::Block;
     }
-
-    // A repair without a known rollback target is never allowed to promote
-    // automatically. Safe Mode already requires approval for every production
-    // mutation; Autopilot falls back to the same requirement here.
     if !context.reversible {
         return PolicyDecision::RequireApproval;
     }
-
     match (context.mode, risk) {
         (SafetyMode::Safe, _) | (_, ActionRisk::Medium) => PolicyDecision::RequireApproval,
         (SafetyMode::AutopilotExperimental, ActionRisk::Low) => PolicyDecision::Allow,
+        (_, ActionRisk::High | ActionRisk::Prohibited) => PolicyDecision::Block,
+    }
+}
+
+/// Deterministic safety facts for a non-deployment production operation.
+///
+/// These values come from trusted configuration, connector capability
+/// discovery, the Kill Switch and action history, never from the model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OperationsPolicyContext {
+    pub mode: SafetyMode,
+    pub kill_switch_active: bool,
+    pub target_configured: bool,
+    pub action_enabled: bool,
+    pub verification_configured: bool,
+    pub cooldown_clear: bool,
+}
+
+/// Decide whether one already-validated typed operations action may run.
+///
+/// The caller derives `risk` and `mutating` from a trusted action enum. The
+/// model never supplies either value directly.
+#[must_use]
+pub const fn decide_operations(
+    risk: ActionRisk,
+    mutating: bool,
+    context: OperationsPolicyContext,
+) -> PolicyDecision {
+    if !mutating {
+        return PolicyDecision::Allow;
+    }
+
+    if context.kill_switch_active
+        || !context.target_configured
+        || !context.action_enabled
+        || !context.verification_configured
+        || !context.cooldown_clear
+        || matches!(risk, ActionRisk::High | ActionRisk::Prohibited)
+    {
+        return PolicyDecision::Block;
+    }
+
+    match (context.mode, risk) {
+        (SafetyMode::Safe, _) => PolicyDecision::RequireApproval,
+        (SafetyMode::AutopilotExperimental, ActionRisk::Low) => PolicyDecision::Allow,
+        (SafetyMode::AutopilotExperimental, ActionRisk::Medium) => PolicyDecision::RequireApproval,
         (_, ActionRisk::High | ActionRisk::Prohibited) => PolicyDecision::Block,
     }
 }
@@ -69,6 +107,17 @@ mod tests {
             kill_switch_active: false,
             preview_verified: true,
             reversible: true,
+        }
+    }
+
+    fn operations_context() -> OperationsPolicyContext {
+        OperationsPolicyContext {
+            mode: SafetyMode::Safe,
+            kill_switch_active: false,
+            target_configured: true,
+            action_enabled: true,
+            verification_configured: true,
+            cooldown_clear: true,
         }
     }
 
@@ -146,5 +195,76 @@ mod tests {
             };
             assert_eq!(decide(risk, autopilot), PolicyDecision::Block);
         }
+    }
+
+    #[test]
+    fn operations_safe_mode_requires_approval_for_restart() {
+        assert_eq!(
+            decide_operations(ActionRisk::Low, true, operations_context()),
+            PolicyDecision::RequireApproval
+        );
+    }
+
+    #[test]
+    fn operations_autopilot_allows_bounded_low_risk_restart() {
+        let context = OperationsPolicyContext {
+            mode: SafetyMode::AutopilotExperimental,
+            ..operations_context()
+        };
+        assert_eq!(
+            decide_operations(ActionRisk::Low, true, context),
+            PolicyDecision::Allow
+        );
+    }
+
+    #[test]
+    fn medium_risk_instance_action_still_requires_approval_in_autopilot() {
+        let context = OperationsPolicyContext {
+            mode: SafetyMode::AutopilotExperimental,
+            ..operations_context()
+        };
+        assert_eq!(
+            decide_operations(ActionRisk::Medium, true, context),
+            PolicyDecision::RequireApproval
+        );
+    }
+
+    #[test]
+    fn missing_verification_or_cooldown_blocks_restart() {
+        for context in [
+            OperationsPolicyContext {
+                verification_configured: false,
+                ..operations_context()
+            },
+            OperationsPolicyContext {
+                cooldown_clear: false,
+                ..operations_context()
+            },
+            OperationsPolicyContext {
+                kill_switch_active: true,
+                ..operations_context()
+            },
+        ] {
+            assert_eq!(
+                decide_operations(ActionRisk::Low, true, context),
+                PolicyDecision::Block
+            );
+        }
+    }
+
+    #[test]
+    fn read_only_or_escalation_path_is_allowed_while_mutations_are_blocked() {
+        let blocked_context = OperationsPolicyContext {
+            kill_switch_active: true,
+            target_configured: false,
+            action_enabled: false,
+            verification_configured: false,
+            cooldown_clear: false,
+            ..operations_context()
+        };
+        assert_eq!(
+            decide_operations(ActionRisk::Low, false, blocked_context),
+            PolicyDecision::Allow
+        );
     }
 }
