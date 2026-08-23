@@ -1,8 +1,14 @@
 # NoPager 60–90 Second Demo Runbook
 
-Use this demo for design-partner outreach. The purpose is to show the product promise and safety boundary, not every internal implementation detail.
+Use this demo for design-partner outreach. The purpose is to show the **incident-triggered AI operations** product promise and the current Alpha safety boundary, not to make GitHub or Vercel look like the product itself.
 
-Only record the customer-facing demo after the same flow has succeeded against a disposable real GitHub repository and real Vercel project. Repository CI alone is not a substitute for that run.
+The audience should leave with one idea:
+
+> **Production breaks. NoPager wakes up — not you.**
+
+The current Alpha happens to prove that idea through one GitHub → Vercel recovery path. Treat those providers as execution surfaces inside the story, not the headline.
+
+Only record the customer-facing live demo after the same flow has succeeded against a disposable real GitHub repository and real Vercel project. Repository CI alone is not a substitute for that run.
 
 ## Before recording
 
@@ -14,23 +20,39 @@ Only record the customer-facing demo after the same flow has succeeded against a
 - Keep the NoPager Overview and Incident Detail pages ready in browser tabs.
 - Never record real API keys, GitHub private keys, webhook secrets, customer data, or production credentials.
 
+## Positioning rule
+
+Do **not** introduce the demo as "an AI that fixes Vercel deployments."
+
+Introduce it as an incident-triggered AI operations engineer:
+
+> NoPager keeps lightweight production monitoring active. When an incident is detected, it wakes the AI operations layer, gathers evidence, chooses a safe recovery path, executes through connected infrastructure, verifies the result, and then returns to monitoring.
+
+For the current Alpha, GitHub + Vercel are simply the first connected tools available to execute and verify that response.
+
+Do not claim that Cloudflare, general server/cloud control, databases, or broader security/capacity automation are already implemented. Those are product-direction execution surfaces described in `PRODUCT_PRINCIPLES.md`, not current Alpha features.
+
 ## Recommended story
 
-### 0–8s — Healthy production
+### 0–8s — Quiet while healthy
 
 Show the app working, then the NoPager Overview.
 
 Narration/message:
 
-> Production is healthy. NoPager is watching it 24/7. No action needed.
+> Production is healthy. NoPager is watching it 24/7. The AI does not need to sit there reasoning while nothing is wrong.
 
-### 8–18s — Introduce a real regression
+### 8–18s — A real production signal fails
 
 Show a small commit that activates the deterministic runtime 500 or health-check regression and push it.
 
-Do not spend time explaining code. The point is that a normal deployment introduced a production failure.
+Do not make the commit or deployment the hero of the scene. The point is simply that production has become unhealthy.
 
-### 18–30s — Detection
+Narration/message:
+
+> Something in production just broke.
+
+### 18–30s — Incident trigger wakes the response loop
 
 Refresh or switch to NoPager.
 
@@ -42,19 +64,21 @@ Show:
 
 Narration/message:
 
-> The app broke. NoPager detected it and started investigating without paging the owner.
+> NoPager detected the incident and woke the response loop before the owner had to notice it manually.
 
-### 30–48s — Diagnosis and repair
+### 30–48s — Operations reasoning
 
 Open Incident Detail.
 
-Show the outcome-first summary, root cause, repair attempt, and a small part of the patch.
+Show the outcome-first summary, root cause, repair attempt, and a small part of the evidence/patch.
 
 Narration/message:
 
-> NoPager correlated the failure with the recent change, produced the smallest repair, and tested it in an isolated sandbox.
+> It gathered the available production evidence, correlated the failure with the recent change, chose a narrow recovery action, and tested that action in isolation.
 
-### 48–62s — PR and Preview
+The viewer should understand that **code repair is one possible operations action**, not the definition of NoPager.
+
+### 48–62s — Execute through connected tools
 
 Show:
 
@@ -65,19 +89,19 @@ Show:
 
 Narration/message:
 
-> The repair is not trusted just because the model wrote code. It has to pass tests and a real Preview health check first.
+> In this Alpha, GitHub and Vercel are the connected execution tools. The repair is not trusted because an AI wrote it; it has to pass validation and a real Preview health check.
 
-### 62–75s — Safe Mode approval
+### 62–75s — Safe Mode production boundary
 
 Show `WAITING_APPROVAL` and the approval bar.
 
 Narration/message:
 
-> Safe Mode stops at the production boundary. The owner sees exactly what changed and approves the verified repair.
+> Safe Mode stops at the production boundary. The system has already investigated and prepared the verified response; the owner only approves the production action.
 
 Click **Approve**.
 
-### 75–90s — Durable recovery
+### 75–90s — Verify durable recovery
 
 Do not cut directly from approval to a green badge. Show enough of the final timeline to prove that NoPager:
 
@@ -87,7 +111,21 @@ Do not cut directly from approval to a green badge. Show enough of the final tim
 
 Final message:
 
-> Production broke. NoPager diagnosed the regression, prepared and verified the repair, waited for approval, then proved source and production converged before closing the incident. You didn't get paged.
+> Production broke. NoPager woke up, investigated, prepared and verified the recovery, waited at the configured safety boundary, and proved production was healthy before going quiet again. You didn't get paged.
+
+## Future demo vocabulary
+
+As new execution surfaces become real and tested, future demos can show different responses to different incident classes, for example:
+
+- abusive traffic → Cloudflare WAF/rate-limit action;
+- process failure → controlled service restart;
+- capacity incident → scale action;
+- bad deployment → rollback;
+- software regression → tested code repair;
+- database incident → safe failover/recovery primitive;
+- cache/routing failure → traffic or cache action.
+
+Those examples should only move from roadmap language into live demos after the corresponding connectors and safety gates actually exist.
 
 ## Safety proof to record separately
 
@@ -101,15 +139,19 @@ The 60–90 second happy-path demo is not enough for the Alpha gate. Keep a seco
 
 This proof matters because traffic rollback and durable source recovery are different safety states.
 
-## What not to show
+## What not to show or claim
 
 Do not turn the first demo into an observability product tour. Avoid long raw logs, trace IDs, token usage, model-selection details, Docker internals, or architecture diagrams.
 
+Do not market NoPager as a GitHub/Vercel deployment assistant. Those are current Alpha connectors.
+
 Do not claim unrestricted autonomous production access. Safe Mode is the default and the demo should visibly prove the production safety boundary.
 
-Do not claim broad cloud/Kubernetes/database remediation. The Alpha is GitHub + Vercel + one protected app.
+Do not claim broad Cloudflare/cloud/server/Kubernetes/database remediation before those execution surfaces are implemented and verified.
 
-Do not call the Alpha broadly production-ready until the real provider acceptance gate in `docs/DESIGN_PARTNER_ALPHA.md` and GitHub issue #55 has passed.
+Do not claim "millisecond incident resolution." Detection and trigger latency can become extremely fast with provider event paths, but actual recovery is constrained by the underlying operation and verification time.
+
+Do not call the Alpha broadly production-ready until the real-provider acceptance gate in `docs/DESIGN_PARTNER_ALPHA.md` and GitHub issue #55 has passed.
 
 ## Backup demo
 
