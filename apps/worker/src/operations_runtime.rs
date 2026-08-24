@@ -25,12 +25,11 @@ const VERIFY_REPEAT_SECONDS: i64 = 10;
 
 pub async fn should_handle(database: &Database, payload: &Value) -> anyhow::Result<bool> {
     let incident_id = incident_id(payload)?;
-    let trigger_type = sqlx::query_scalar::<_, String>(
-        "SELECT trigger_type FROM incidents WHERE id = $1",
-    )
-    .bind(incident_id)
-    .fetch_one(database.pool())
-    .await?;
+    let trigger_type =
+        sqlx::query_scalar::<_, String>("SELECT trigger_type FROM incidents WHERE id = $1")
+            .bind(incident_id)
+            .fetch_one(database.pool())
+            .await?;
     Ok(trigger_type == "HEALTH_CHECK")
 }
 
@@ -771,7 +770,10 @@ async fn provider_for(
     database: &Database,
     project_id: Uuid,
 ) -> anyhow::Result<Box<dyn ModelProvider>> {
-    if let Ok(integration) = database.integration_secret(project_id, "model_provider").await {
+    if let Ok(integration) = database
+        .integration_secret(project_id, "model_provider")
+        .await
+    {
         let credentials = decrypt_credentials(&integration.encrypted_credentials)?;
         let api_key = SecretString::from(required_string(&credentials, "apiKey")?.to_owned());
         let kind = integration
@@ -874,7 +876,9 @@ fn docker_error_class(error: &DockerOperationsError) -> &'static str {
 }
 
 fn incident_id(payload: &Value) -> anyhow::Result<Uuid> {
-    required_string(payload, "incidentId")?.parse().map_err(Into::into)
+    required_string(payload, "incidentId")?
+        .parse()
+        .map_err(Into::into)
 }
 
 fn operation_action_id(payload: &Value) -> anyhow::Result<Uuid> {
