@@ -71,13 +71,16 @@ impl IncidentState {
                 | (S::CollectingContext, S::Diagnosing)
                 | (S::Diagnosing, S::Planning)
                 | (S::Planning, S::Repairing)
+                | (S::Planning, S::WaitingApproval)
                 | (S::Repairing, S::Testing)
                 | (S::Testing, S::Repairing)
                 | (S::Testing, S::PreviewDeploying)
+                | (S::Testing, S::Resolved)
                 | (S::PreviewDeploying, S::VerifyingPreview)
                 | (S::VerifyingPreview, S::Repairing)
                 | (S::VerifyingPreview, S::WaitingApproval)
                 | (S::VerifyingPreview, S::ProductionDeploying)
+                | (S::WaitingApproval, S::Repairing)
                 | (S::WaitingApproval, S::ProductionDeploying)
                 | (S::ProductionDeploying, S::VerifyingProduction)
                 | (S::VerifyingProduction, S::Resolved)
@@ -342,6 +345,13 @@ mod tests {
     fn production_cannot_skip_approval_path_from_safe_preview() {
         assert!(!IncidentState::VerifyingPreview.can_transition_to(IncidentState::Resolved));
         assert!(IncidentState::VerifyingPreview.can_transition_to(IncidentState::WaitingApproval));
+    }
+
+    #[test]
+    fn operations_can_wait_for_approval_and_resolve_after_verification() {
+        assert!(IncidentState::Planning.can_transition_to(IncidentState::WaitingApproval));
+        assert!(IncidentState::WaitingApproval.can_transition_to(IncidentState::Repairing));
+        assert!(IncidentState::Testing.can_transition_to(IncidentState::Resolved));
     }
 
     fn external_health_verification() -> OperationsVerificationPlan {
