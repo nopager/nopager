@@ -59,8 +59,8 @@ export default async function OverviewPage() {
           </h2>
           <p>
             NoPager monitors production signals and health checks around the
-            clock, then wakes AI operations reasoning only when an incident needs
-            attention.
+            clock, then wakes AI operations reasoning only when an incident
+            needs attention.
           </p>
         </div>
         <div className="status-metric">
