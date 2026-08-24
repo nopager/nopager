@@ -30,6 +30,8 @@ export default async function IncidentDetailPage({
         />
       </div>
     );
+
+  const operation = incident.currentOperation;
   const attempt = incident.currentAttempt;
   const diagnosis = attempt?.diagnosis;
   const diagnosisSummary =
@@ -39,16 +41,18 @@ export default async function IncidentDetailPage({
       "rootCauseSummary",
       "suspectedRootCause",
     ) ??
+    stringValue(operation?.plan, "summary") ??
     incident.rootCauseSummary ??
     "No root-cause summary is available yet.";
   const sourceRecovery =
-    incident.status === "ESCALATED"
+    incident.status === "ESCALATED" && !operation
       ? sourceRecoveryAction(incident.events)
       : null;
   const sourceRecoveryCopy = sourceRecovery
     ? sourceRecoveryNotice(sourceRecovery)
     : null;
   const outcome = incidentOutcome(incident, sourceRecoveryCopy);
+  const approvalKind = operation ? "operation" : "deployment";
 
   return (
     <div className="page">
@@ -66,12 +70,20 @@ export default async function IncidentDetailPage({
           <span>!</span>
           <div>
             <strong>Your approval is required</strong>
-            <p>
-              The preview passed policy checks. Safe Mode prevents an unapproved
-              production change.
-            </p>
+            {operation ? (
+              <p>
+                NoPager proposes a bounded {humanize(operation.actionKind)} on{" "}
+                <strong>{operation.targetId ?? "the configured target"}</strong>
+                . Safe Mode keeps production unchanged until you approve it.
+              </p>
+            ) : (
+              <p>
+                The preview passed policy checks. Safe Mode prevents an
+                unapproved production change.
+              </p>
+            )}
           </div>
-          <ApproveButton incidentId={incident.id} />
+          <ApproveButton incidentId={incident.id} kind={approvalKind} />
         </div>
       )}
       {sourceRecovery && sourceRecoveryCopy && (
@@ -124,77 +136,144 @@ export default async function IncidentDetailPage({
               ))}
             </div>
           </Card>
-          <Card>
-            <SectionTitle
-              title="Evidence & root cause"
-              detail={
-                stringValue(diagnosis, "confidence")
-                  ? `Confidence ${stringValue(diagnosis, "confidence")}`
-                  : undefined
-              }
-            />
-            <p className="result-copy">{diagnosisSummary}</p>
-            {diagnosis && (
-              <details>
-                <summary>Technical evidence</summary>
-                <pre>{JSON.stringify(diagnosis, null, 2)}</pre>
-              </details>
-            )}
-          </Card>
-          <Card>
-            <SectionTitle
-              title="Patch / repair"
-              detail={
-                attempt ? `Attempt ${attempt.attemptNumber}` : "Not started"
-              }
-            />
-            {attempt?.patchDiff ? (
-              <pre className="code-block">{attempt.patchDiff}</pre>
-            ) : (
-              <p className="muted">No patch has been generated.</p>
-            )}
-            {attempt?.pullRequestUrl && (
-              <a
-                className="text-link"
-                href={attempt.pullRequestUrl}
-                target="_blank"
-                rel="noreferrer"
-              >
-                Open repair pull request →
-              </a>
-            )}
-          </Card>
+
+          {operation ? (
+            <>
+              <Card>
+                <SectionTitle
+                  title="AI operations plan"
+                  detail={humanize(operation.actionKind)}
+                />
+                <p className="result-copy">{diagnosisSummary}</p>
+                <dl className="detail-list">
+                  <div>
+                    <dt>Target</dt>
+                    <dd>{operation.targetId ?? "No mutation target"}</dd>
+                  </div>
+                  <div>
+                    <dt>Policy</dt>
+                    <dd>{humanize(operation.policyDecision)}</dd>
+                  </div>
+                  <div>
+                    <dt>Execution status</dt>
+                    <dd>{humanize(operation.status)}</dd>
+                  </div>
+                </dl>
+                <details>
+                  <summary>Bounded AI plan and evidence</summary>
+                  <pre>{JSON.stringify(operation.plan, null, 2)}</pre>
+                </details>
+              </Card>
+              <Card>
+                <SectionTitle title="Operation execution & verification" />
+                {operation.execution ? (
+                  <details open>
+                    <summary>Execution result</summary>
+                    <pre>{JSON.stringify(operation.execution, null, 2)}</pre>
+                  </details>
+                ) : (
+                  <p className="muted">
+                    No production mutation has been recorded yet.
+                  </p>
+                )}
+                {operation.verification ? (
+                  <details open>
+                    <summary>Independent verification</summary>
+                    <pre>{JSON.stringify(operation.verification, null, 2)}</pre>
+                  </details>
+                ) : (
+                  <p className="muted">
+                    Verification begins only after a permitted operation
+                    executes.
+                  </p>
+                )}
+              </Card>
+            </>
+          ) : (
+            <>
+              <Card>
+                <SectionTitle
+                  title="Evidence & root cause"
+                  detail={
+                    stringValue(diagnosis, "confidence")
+                      ? `Confidence ${stringValue(diagnosis, "confidence")}`
+                      : undefined
+                  }
+                />
+                <p className="result-copy">{diagnosisSummary}</p>
+                {diagnosis && (
+                  <details>
+                    <summary>Technical evidence</summary>
+                    <pre>{JSON.stringify(diagnosis, null, 2)}</pre>
+                  </details>
+                )}
+              </Card>
+              <Card>
+                <SectionTitle
+                  title="Patch / repair"
+                  detail={
+                    attempt ? `Attempt ${attempt.attemptNumber}` : "Not started"
+                  }
+                />
+                {attempt?.patchDiff ? (
+                  <pre className="code-block">{attempt.patchDiff}</pre>
+                ) : (
+                  <p className="muted">No patch has been generated.</p>
+                )}
+                {attempt?.pullRequestUrl && (
+                  <a
+                    className="text-link"
+                    href={attempt.pullRequestUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Open repair pull request →
+                  </a>
+                )}
+              </Card>
+            </>
+          )}
         </div>
         <aside className="detail-side">
-          <Card>
-            <SectionTitle title="Sandbox & preview" />
-            <ul className="check-list">
-              <li>Sandbox: {attempt?.sandboxStatus ?? "PENDING"}</li>
-              <li>Tests: {attempt?.testStatus ?? "PENDING"}</li>
-              <li>Validation checks: {attempt?.validation.length ?? 0}</li>
-              <li>Preview: {attempt?.previewUrl ? "Ready" : "Pending"}</li>
-            </ul>
-            {attempt?.previewUrl && (
-              <a
-                className="text-link"
-                href={attempt.previewUrl}
-                target="_blank"
-                rel="noreferrer"
-              >
-                Open preview →
-              </a>
-            )}
-          </Card>
+          {!operation && (
+            <Card>
+              <SectionTitle title="Sandbox & preview" />
+              <ul className="check-list">
+                <li>Sandbox: {attempt?.sandboxStatus ?? "PENDING"}</li>
+                <li>Tests: {attempt?.testStatus ?? "PENDING"}</li>
+                <li>Validation checks: {attempt?.validation.length ?? 0}</li>
+                <li>Preview: {attempt?.previewUrl ? "Ready" : "Pending"}</li>
+              </ul>
+              {attempt?.previewUrl && (
+                <a
+                  className="text-link"
+                  href={attempt.previewUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Open preview →
+                </a>
+              )}
+            </Card>
+          )}
           <Card>
             <SectionTitle title="Production policy" />
             <p className="muted">
               {incident.safetyMode.replaceAll("_", " ")} ·{" "}
-              {attempt?.riskLevel ?? "Risk pending"}
+              {operation
+                ? `${humanize(operation.actionKind)} · ${humanize(operation.status)}`
+                : (attempt?.riskLevel ?? "Risk pending")}
             </p>
+            {operation && (
+              <p className="muted">
+                Operations are restricted to persisted configured targets and
+                are independently verified after execution.
+              </p>
+            )}
             {incident.status === "WAITING_APPROVAL" && (
               <>
-                <ApproveButton incidentId={incident.id} />
-                <RejectButton incidentId={incident.id} />
+                <ApproveButton incidentId={incident.id} kind={approvalKind} />
+                <RejectButton incidentId={incident.id} kind={approvalKind} />
               </>
             )}
           </Card>
@@ -258,6 +337,7 @@ function incidentOutcome(
   incident: IncidentDetail,
   sourceRecovery: SourceRecoveryCopy | null,
 ) {
+  const operation = incident.currentOperation;
   if (incident.status === "ESCALATED" && sourceRecovery) {
     return {
       label: "Source recovery needs review",
@@ -265,6 +345,81 @@ function incidentOutcome(
       message: sourceRecovery.message,
       nextStep: sourceRecovery.nextStep,
     };
+  }
+
+  if (operation) {
+    switch (incident.status) {
+      case "RESOLVED":
+        return {
+          label: incident.autonomousResolution
+            ? "Recovered autonomously"
+            : "Recovered",
+          headline: "Production is healthy again.",
+          message:
+            incident.rootCauseSummary ??
+            "NoPager executed the bounded production operation and independently verified recovery.",
+          nextStep:
+            "No action needed. The full operation remains available for audit.",
+        };
+      case "WAITING_APPROVAL":
+        return {
+          label: "Production operation needs approval",
+          headline: "NoPager has a bounded recovery action ready for review.",
+          message: `The proposed action is ${humanize(operation.actionKind)} on ${operation.targetId ?? "the configured target"}. No mutation has been executed.`,
+          nextStep:
+            "Review the AI plan, evidence, target, and verification requirements below, then approve or reject the operation.",
+        };
+      case "REPAIRING":
+      case "VERIFYING_PRODUCTION":
+        return {
+          label: "Recovery in progress",
+          headline:
+            "NoPager is executing or verifying the bounded production operation.",
+          message:
+            "The operation is constrained to its persisted configured target and will not be repeated blindly.",
+          nextStep:
+            "No action needed while independent verification is running.",
+        };
+      case "CANCELLED":
+        return {
+          label: "Operation rejected",
+          headline: "The proposed production operation was not executed.",
+          message:
+            "Safe Mode kept production unchanged after the operation was rejected.",
+          nextStep:
+            "Handle the incident manually or wait for a new independently triggered incident.",
+        };
+      case "PAUSED":
+        return {
+          label: "Protection paused",
+          headline: "Production mutations are paused.",
+          message:
+            "NoPager keeps monitoring while the Kill Switch blocks production operations.",
+          nextStep: "Resume only after the production risk is understood.",
+        };
+      case "FAILED":
+      case "ESCALATED":
+        return {
+          label: "Human action required",
+          headline:
+            "NoPager stopped before repeating or making an unsafe operation.",
+          message:
+            incident.rootCauseSummary ??
+            "The bounded recovery path could not be proven safe or successful.",
+          nextStep:
+            "Review the AI plan, execution record, and verification evidence below. NoPager will not blindly retry the mutation.",
+        };
+      default:
+        return {
+          label: "Operations triage",
+          headline: "NoPager is investigating the production incident.",
+          message:
+            incident.rootCauseSummary ??
+            "NoPager is collecting bounded operational evidence and deciding whether a configured recovery action is justified.",
+          nextStep:
+            "No action needed unless Safe Mode requests approval or the incident escalates.",
+        };
+    }
   }
 
   switch (incident.status) {
@@ -389,4 +544,8 @@ function stringValue(
       return String(item);
   }
   return null;
+}
+
+function humanize(value: string) {
+  return value.replaceAll("_", " ").replaceAll("-", " ");
 }

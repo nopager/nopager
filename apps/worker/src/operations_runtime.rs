@@ -336,10 +336,20 @@ async fn plan_container_restart(
         PolicyDecision::RequireApproval => {
             mark_operation_status(database, action_id, "APPROVAL_REQUIRED", None).await?;
             database
-                .escalate_incident(
+                .transition_incident(IncidentTransition {
+                    project_id: work.project_id,
                     incident_id,
-                    "Safe Mode requires human approval for production mutation; container-action approval is not enabled in this build, so NoPager left production unchanged",
-                )
+                    expected: IncidentState::Planning,
+                    next: IncidentState::WaitingApproval,
+                    actor: "policy-engine".into(),
+                    message: "Safe Mode requires approval before the proposed production operation"
+                        .into(),
+                    metadata: json!({
+                        "operationActionId": action_id,
+                        "action": "restart_container",
+                        "targetId": target
+                    }),
+                })
                 .await?;
         }
         PolicyDecision::Block => {
