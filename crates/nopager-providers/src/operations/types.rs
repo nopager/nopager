@@ -392,10 +392,7 @@ pub(crate) fn operations_schema() -> Value {
     })
 }
 
-fn validate_identifier(
-    value: &str,
-    field: &'static str,
-) -> Result<(), OperationsValidationError> {
+fn validate_identifier(value: &str, field: &'static str) -> Result<(), OperationsValidationError> {
     let trimmed = value.trim();
     if trimmed.is_empty()
         || trimmed.len() > 256
