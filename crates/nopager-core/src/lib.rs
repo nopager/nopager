@@ -72,6 +72,7 @@ impl IncidentState {
                 | (S::Diagnosing, S::Planning)
                 | (S::Planning, S::Repairing)
                 | (S::Repairing, S::Testing)
+                | (S::Repairing, S::VerifyingProduction)
                 | (S::Testing, S::Repairing)
                 | (S::Testing, S::PreviewDeploying)
                 | (S::PreviewDeploying, S::VerifyingPreview)
@@ -342,6 +343,12 @@ mod tests {
     fn production_cannot_skip_approval_path_from_safe_preview() {
         assert!(!IncidentState::VerifyingPreview.can_transition_to(IncidentState::Resolved));
         assert!(IncidentState::VerifyingPreview.can_transition_to(IncidentState::WaitingApproval));
+    }
+
+    #[test]
+    fn bounded_operations_can_verify_without_entering_deployment_states() {
+        assert!(IncidentState::Repairing.can_transition_to(IncidentState::VerifyingProduction));
+        assert!(IncidentState::VerifyingProduction.can_transition_to(IncidentState::Resolved));
     }
 
     fn external_health_verification() -> OperationsVerificationPlan {

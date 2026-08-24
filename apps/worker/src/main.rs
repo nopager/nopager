@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
+mod operations_runtime;
 mod production;
 mod source_recovery;
 
@@ -145,7 +146,20 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn execute_job(database: &Database, job: &Job) -> anyhow::Result<()> {
+    if job.job_type == "incident-context"
+        && operations_runtime::should_handle(database, &job.payload_json).await?
+    {
+        return operations_runtime::process_context(database, &job.payload_json).await;
+    }
+
     match job.job_type.as_str() {
+        "operations-plan" => operations_runtime::process_plan(database, &job.payload_json).await,
+        "operations-execute" => {
+            operations_runtime::process_execute(database, &job.payload_json).await
+        }
+        "operations-verify" => {
+            operations_runtime::process_verify(database, &job.payload_json).await
+        }
         "production-action"
             if job.payload_json.get("action").and_then(Value::as_str) == Some("rollback") =>
         {
