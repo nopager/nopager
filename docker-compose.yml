@@ -14,6 +14,8 @@ services:
     image: postgres:17-alpine
     restart: unless-stopped
     logging: *default-logging
+    labels:
+      com.nopager.control-plane: "true"
     environment:
       POSTGRES_DB: nopager
       POSTGRES_USER: nopager
@@ -39,6 +41,8 @@ services:
     stop_signal: SIGINT
     stop_grace_period: 30s
     logging: *default-logging
+    labels:
+      com.nopager.control-plane: "true"
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -66,6 +70,8 @@ services:
     command: ["sh", "-c", "chown -R 10001:10001 /workspaces"]
     network_mode: none
     logging: *default-logging
+    labels:
+      com.nopager.control-plane: "true"
     volumes:
       - nopager-workspaces:/workspaces
 
@@ -79,6 +85,8 @@ services:
     init: true
     stop_grace_period: 30s
     logging: *default-logging
+    labels:
+      com.nopager.control-plane: "true"
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -129,6 +137,8 @@ services:
     init: true
     stop_grace_period: 30s
     logging: *default-logging
+    labels:
+      com.nopager.control-plane: "true"
     security_opt:
       - no-new-privileges:true
     cap_drop:
