@@ -7,7 +7,7 @@ use axum::{
 use nopager_monitor::{check_http, validate_health_url};
 use secrecy::SecretString;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::json;
 use url::Url;
 use uuid::Uuid;
 
@@ -102,7 +102,7 @@ pub(super) async fn protect_operations_app(
         .rev()
         .collect::<String>();
     let provider_credentials = match cipher.encrypt(&SecretString::from(
-        json!({ "apiKey": request.provider_api_key }).to_string(),
+        json!({ "apiKey": &request.provider_api_key }).to_string(),
     )) {
         Ok(value) => value,
         Err(error) => {
@@ -141,17 +141,32 @@ pub(super) async fn protect_operations_app(
         }
     };
 
-    let setup_result: Result<(), sqlx::Error> = async {
-        sqlx::query("SELECT pg_advisory_xact_lock(7061676573)")
-            .execute(&mut *tx)
-            .await?;
-        let exists = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM projects)")
-            .fetch_one(&mut *tx)
-            .await?;
-        if exists {
-            return Err(sqlx::Error::Protocol("project_already_exists".into()));
+    if let Err(error) = sqlx::query("SELECT pg_advisory_xact_lock(7061676573)")
+        .execute(&mut *tx)
+        .await
+    {
+        tracing::error!(%error, "failed to acquire operations setup lock");
+        let _ = tx.rollback().await;
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error").into_response();
+    }
+    let exists = match sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM projects)")
+        .fetch_one(&mut *tx)
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(%error, "failed to inspect existing protected app");
+            let _ = tx.rollback().await;
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
+                .into_response();
         }
+    };
+    if exists {
+        let _ = tx.rollback().await;
+        return api_error(StatusCode::CONFLICT, "app_already_protected").into_response();
+    }
 
+    let setup_result: Result<(), sqlx::Error> = async {
         sqlx::query(
             "INSERT INTO projects (id, name, slug, repo_owner, repo_name, production_url, safety_mode) VALUES ($1, $2, 'operations-only', '', '', $3, $4)",
         )
@@ -170,8 +185,8 @@ pub(super) async fn protect_operations_app(
         .bind(&request.provider)
         .bind(&provider_credentials)
         .bind(json!({
-            "provider": request.provider,
-            "model": request.provider_model,
+            "provider": &request.provider,
+            "model": &request.provider_model,
             "keySuffix": provider_key_suffix
         }))
         .execute(&mut *tx)
@@ -185,7 +200,7 @@ pub(super) async fn protect_operations_app(
         .bind(&request.docker_target)
         .bind(&docker_credentials)
         .bind(json!({
-            "targetId": request.docker_target,
+            "targetId": &request.docker_target,
             "allowedActions": ["restart_container"],
             "runtimePreflightRequired": true
         }))
@@ -231,11 +246,8 @@ pub(super) async fn protect_operations_app(
     .await;
 
     if let Err(error) = setup_result {
-        let _ = tx.rollback().await;
-        if error.to_string().contains("project_already_exists") {
-            return api_error(StatusCode::CONFLICT, "app_already_protected").into_response();
-        }
         tracing::error!(%error, "failed to persist operations-only protected app");
+        let _ = tx.rollback().await;
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error").into_response();
     }
     if let Err(error) = tx.commit().await {
