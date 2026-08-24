@@ -56,6 +56,19 @@ export type IncidentDetail = IncidentSummary & {
     metadata: unknown;
     createdAt: string;
   }>;
+  currentOperation: null | {
+    id: string;
+    actionKind: string;
+    targetId: string | null;
+    plan: Record<string, unknown>;
+    policyDecision: string;
+    status: string;
+    execution: Record<string, unknown> | null;
+    verification: Record<string, unknown> | null;
+    startedAt: string | null;
+    completedAt: string | null;
+    createdAt: string;
+  };
   currentAttempt: null | {
     id: string;
     attemptNumber: number;
