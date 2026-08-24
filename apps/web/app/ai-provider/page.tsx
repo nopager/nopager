@@ -45,8 +45,8 @@ export default async function AiProviderPage() {
           <h2>{name}</h2>
           <p>
             {connected
-              ? "Connected · Used for diagnosis and repair"
-              : "Provider is not ready; automatic repair will not run"}
+              ? "Connected · Used only when incidents need AI operations reasoning"
+              : "Provider is not ready; incident reasoning will not run"}
           </p>
         </div>
         <span className={connected ? "connected" : "status-badge waiting"}>
@@ -73,8 +73,8 @@ export default async function AiProviderPage() {
         </dl>
         <small>
           Secrets are never returned by the API or shown in incident evidence.
-          Repository diffs and logs are treated as untrusted evidence before a
-          repair is proposed.
+          Logs, deployment context, runtime state, and source evidence are treated
+          as untrusted input before an operation is proposed.
         </small>
       </Card>
       <div className="notice blue">
@@ -82,8 +82,8 @@ export default async function AiProviderPage() {
         <div>
           <strong>BYOK keeps model usage under your control</strong>
           <p>
-            NoPager does not mark up token costs or use tokens as a billing
-            unit.
+            NoPager keeps cheap monitoring active continuously and wakes the model
+            only after a meaningful incident trigger.
           </p>
         </div>
       </div>
