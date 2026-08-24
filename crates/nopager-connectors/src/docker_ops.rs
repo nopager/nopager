@@ -321,7 +321,7 @@ mod tests {
     fn allows_separate_customer_compose_project() {
         let target = state("customer-app", Some("customer"), false);
         let worker = state("worker", Some("nopager"), true);
-        assert_eq!(ensure_safe_mutation_target(&target, Some(&worker)), Ok(()));
+        assert!(ensure_safe_mutation_target(&target, Some(&worker)).is_ok());
     }
 
     #[test]
