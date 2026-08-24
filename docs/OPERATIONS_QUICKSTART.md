@@ -87,7 +87,9 @@ sh scripts/operations-quickstart.sh
 
 For Anthropic, use `ANTHROPIC_API_KEY`; for Gemini, use `GEMINI_API_KEY`.
 
-The script writes the provider selection/key and Docker target to the local `.env`, which is permissioned `0600`. The admin password is used only to create the local account and is **not** written to `.env`.
+The BYOK key is sent only to the local setup API during preflight/persistence, encrypted with `NOPAGER_MASTER_KEY`, and stored in PostgreSQL as the `model_provider` integration. After setup, the operations quickstart clears provider-key environment entries from NoPager's `.env` before recreating the worker. The admin password is used only to create the local account and is **not** written to `.env`.
+
+The Docker target and `NOPAGER_ALLOW_CONTAINER_RESTART=true` remain in the permissioned local `.env` as explicit worker-side hard gates. Changing those values is not treated as a silent supported retarget: rerunning the operations quickstart checks the stored production URL, health URL, Docker target, provider, and model and fails closed if they do not match the existing protected app.
 
 ## What the setup proves before enabling protection
 
@@ -111,7 +113,7 @@ GitHub and Vercel are not configured or required on this path.
 
 Keep **Safe Mode** enabled.
 
-A real health incident requires three consecutive failed health checks. Once the incident opens, NoPager wakes the model and presents only the bounded operations actions actually configured. The Docker restart connector never accepts model-generated shell commands. Trusted NoPager code executes a fixed `docker container restart` operation against the configured target only.
+A real health incident requires three consecutive failed health checks. Once the incident opens, NoPager wakes the model and presents only the bounded operations actions actually configured. An operations-only project does not expose the GitHub/Vercel deployment-recovery action to the model. The Docker restart connector never accepts model-generated shell commands. Trusted NoPager code executes a fixed `docker container restart` operation against the configured target only.
 
 When the AI proposes the restart, the incident enters `WAITING_APPROVAL`. In the console, review:
 
