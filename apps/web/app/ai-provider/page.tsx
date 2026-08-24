@@ -73,8 +73,8 @@ export default async function AiProviderPage() {
         </dl>
         <small>
           Secrets are never returned by the API or shown in incident evidence.
-          Logs, deployment context, runtime state, and source evidence are treated
-          as untrusted input before an operation is proposed.
+          Logs, deployment context, runtime state, and source evidence are
+          treated as untrusted input before an operation is proposed.
         </small>
       </Card>
       <div className="notice blue">
@@ -82,8 +82,8 @@ export default async function AiProviderPage() {
         <div>
           <strong>BYOK keeps model usage under your control</strong>
           <p>
-            NoPager keeps cheap monitoring active continuously and wakes the model
-            only after a meaningful incident trigger.
+            NoPager keeps cheap monitoring active continuously and wakes the
+            model only after a meaningful incident trigger.
           </p>
         </div>
       </div>
