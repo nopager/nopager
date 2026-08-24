@@ -788,6 +788,106 @@ impl Database {
         incident_id: Uuid,
         actor: &str,
     ) -> Result<(), DatabaseError> {
+        if let Some((action_id, status, policy_decision)) = sqlx::query_as::<_, (Uuid, String, String)>(
+            "SELECT id, status, policy_decision FROM operations_actions WHERE incident_id = $1 ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(incident_id)
+        .fetch_optional(&self.pool)
+        .await?
+        {
+            if policy_decision == "approved"
+                && matches!(status.as_str(), "PLANNED" | "RUNNING" | "EXECUTED" | "VERIFIED")
+            {
+                return Ok(());
+            }
+
+            let mut tx = self.pool.begin().await?;
+            let locked = sqlx::query_as::<_, (Uuid, String, String, String, bool, Uuid)>(
+                "SELECT oa.id, oa.status, oa.policy_decision, i.status, p.protection_paused, i.project_id
+                 FROM operations_actions oa
+                 JOIN incidents i ON i.id = oa.incident_id
+                 JOIN projects p ON p.id = i.project_id
+                 WHERE oa.id = $1 AND oa.incident_id = $2
+                 FOR UPDATE OF oa, i, p",
+            )
+            .bind(action_id)
+            .bind(incident_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            let (action_id, action_status, _, incident_status, protection_paused, project_id) = locked;
+            if protection_paused {
+                return Err(DatabaseError::ProtectionPaused);
+            }
+            if action_status != "APPROVAL_REQUIRED" || incident_status != "WAITING_APPROVAL" {
+                return Err(DatabaseError::IncidentNotAwaitingApproval);
+            }
+
+            sqlx::query("UPDATE operations_actions SET status = 'PLANNED', policy_decision = 'approved', completed_at = NULL WHERE id = $1 AND status = 'APPROVAL_REQUIRED'")
+                .bind(action_id)
+                .execute(&mut *tx)
+                .await?;
+            let updated = sqlx::query("UPDATE incidents SET status = 'REPAIRING' WHERE id = $1 AND project_id = $2 AND status = 'WAITING_APPROVAL'")
+                .bind(incident_id)
+                .bind(project_id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+            if updated != 1 {
+                return Err(DatabaseError::ConcurrentIncidentUpdate);
+            }
+            insert_incident_event(
+                &mut tx,
+                incident_id,
+                "STATE_CHANGED",
+                actor,
+                "Production operation approved",
+                &serde_json::json!({
+                    "from": "WAITING_APPROVAL",
+                    "to": "REPAIRING",
+                    "operationActionId": action_id
+                }),
+            )
+            .await?;
+            insert_audit_event(
+                &mut tx,
+                project_id,
+                Some(incident_id),
+                actor,
+                "operations.approval",
+                &action_id.to_string(),
+                "approved",
+                &serde_json::json!({ "operationActionId": action_id }),
+            )
+            .await?;
+            insert_audit_event(
+                &mut tx,
+                project_id,
+                Some(incident_id),
+                actor,
+                "incident.transition",
+                &incident_id.to_string(),
+                "success",
+                &serde_json::json!({
+                    "from": "WAITING_APPROVAL",
+                    "to": "REPAIRING",
+                    "context": { "operationActionId": action_id }
+                }),
+            )
+            .await?;
+            sqlx::query("INSERT INTO jobs (id, job_type, idempotency_key, correlation_id, payload_json, max_attempts) VALUES ($1, 'operations-execute', $2, $3, $4, 1) ON CONFLICT (idempotency_key) DO NOTHING")
+                .bind(Uuid::now_v7())
+                .bind(format!("incident:{incident_id}:operations-execute:{action_id}"))
+                .bind(incident_id)
+                .bind(serde_json::json!({
+                    "incidentId": incident_id,
+                    "operationActionId": action_id
+                }))
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            return Ok(());
+        }
+
         let work = self.incident_work(incident_id).await?;
         if work.protection_paused {
             return Err(DatabaseError::ProtectionPaused);
@@ -829,6 +929,89 @@ impl Database {
         incident_id: Uuid,
         actor: &str,
     ) -> Result<(), DatabaseError> {
+        if let Some((action_id, status, policy_decision)) = sqlx::query_as::<_, (Uuid, String, String)>(
+            "SELECT id, status, policy_decision FROM operations_actions WHERE incident_id = $1 ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(incident_id)
+        .fetch_optional(&self.pool)
+        .await?
+        {
+            if status == "REJECTED" && policy_decision == "rejected" {
+                return Ok(());
+            }
+
+            let mut tx = self.pool.begin().await?;
+            let locked = sqlx::query_as::<_, (Uuid, String, String, Uuid)>(
+                "SELECT oa.id, oa.status, i.status, i.project_id
+                 FROM operations_actions oa
+                 JOIN incidents i ON i.id = oa.incident_id
+                 WHERE oa.id = $1 AND oa.incident_id = $2
+                 FOR UPDATE OF oa, i",
+            )
+            .bind(action_id)
+            .bind(incident_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            let (action_id, action_status, incident_status, project_id) = locked;
+            if action_status != "APPROVAL_REQUIRED" || incident_status != "WAITING_APPROVAL" {
+                return Err(DatabaseError::IncidentNotAwaitingApproval);
+            }
+            sqlx::query("UPDATE operations_actions SET status = 'REJECTED', policy_decision = 'rejected', completed_at = now() WHERE id = $1 AND status = 'APPROVAL_REQUIRED'")
+                .bind(action_id)
+                .execute(&mut *tx)
+                .await?;
+            let updated = sqlx::query("UPDATE incidents SET status = 'CANCELLED' WHERE id = $1 AND project_id = $2 AND status = 'WAITING_APPROVAL'")
+                .bind(incident_id)
+                .bind(project_id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+            if updated != 1 {
+                return Err(DatabaseError::ConcurrentIncidentUpdate);
+            }
+            insert_incident_event(
+                &mut tx,
+                incident_id,
+                "STATE_CHANGED",
+                actor,
+                "Production operation rejected by administrator",
+                &serde_json::json!({
+                    "from": "WAITING_APPROVAL",
+                    "to": "CANCELLED",
+                    "operationActionId": action_id
+                }),
+            )
+            .await?;
+            insert_audit_event(
+                &mut tx,
+                project_id,
+                Some(incident_id),
+                actor,
+                "operations.approval",
+                &action_id.to_string(),
+                "rejected",
+                &serde_json::json!({ "operationActionId": action_id }),
+            )
+            .await?;
+            insert_audit_event(
+                &mut tx,
+                project_id,
+                Some(incident_id),
+                actor,
+                "incident.transition",
+                &incident_id.to_string(),
+                "success",
+                &serde_json::json!({
+                    "from": "WAITING_APPROVAL",
+                    "to": "CANCELLED",
+                    "context": { "operationActionId": action_id }
+                }),
+            )
+            .await?;
+            tx.commit().await?;
+            return Ok(());
+        }
+
         let work = self.incident_work(incident_id).await?;
         if work.state != IncidentState::WaitingApproval {
             return Err(DatabaseError::IncidentNotAwaitingApproval);
@@ -952,8 +1135,20 @@ impl Database {
         .bind(incident_id)
         .fetch_optional(&self.pool)
         .await?;
+        let operation = sqlx::query_scalar::<_, Value>(
+            "SELECT jsonb_build_object(
+                'id', id, 'actionKind', action_kind, 'targetId', target_id,
+                'plan', plan_json, 'policyDecision', policy_decision, 'status', status,
+                'execution', execution_json, 'verification', verification_json,
+                'startedAt', started_at, 'completedAt', completed_at, 'createdAt', created_at
+             ) FROM operations_actions WHERE incident_id = $1 ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(incident_id)
+        .fetch_optional(&self.pool)
+        .await?;
         object.insert("events".into(), events);
         object.insert("currentAttempt".into(), attempt.unwrap_or(Value::Null));
+        object.insert("currentOperation".into(), operation.unwrap_or(Value::Null));
         Ok(incident)
     }
 
@@ -1171,9 +1366,18 @@ impl Database {
         let updated = sqlx::query(
             "UPDATE incidents SET status = $1,
                 resolved_at = CASE WHEN $1 IN ('RESOLVED', 'ROLLED_BACK') THEN now() ELSE resolved_at END,
-                autonomous_resolution = CASE WHEN $1 = 'RESOLVED' THEN NOT EXISTS (
-                    SELECT 1 FROM incident_events WHERE incident_id = $2 AND actor = 'api-admin' AND message = 'Production deployment approved'
-                ) ELSE autonomous_resolution END
+                autonomous_resolution = CASE WHEN $1 = 'RESOLVED' THEN
+                    NOT EXISTS (
+                        SELECT 1 FROM incident_events
+                        WHERE incident_id = $2
+                          AND actor = 'api-admin'
+                          AND message = 'Production deployment approved'
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1 FROM operations_actions
+                        WHERE incident_id = $2 AND policy_decision = 'approved'
+                    )
+                    ELSE autonomous_resolution END
              WHERE id = $2 AND project_id = $3 AND status = $4",
         )
         .bind(state_name(next))
