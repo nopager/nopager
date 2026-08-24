@@ -195,7 +195,12 @@ fi
 printf '\nNoPager is ready.\n'
 printf 'Console: http://localhost:%s/setup\n' "$web_port"
 printf 'Local API health: http://127.0.0.1:%s/healthz\n' "$api_port"
-printf '\nNext: open the console and complete GitHub, Vercel, AI provider, and health-check setup.\n'
+if [ "${NOPAGER_QUICKSTART_MODE:-}" = "operations" ]; then
+  printf '\nOperations-first setup is continuing with provider, health, Docker-target, and safety preflights.\n'
+else
+  printf '\nFor the first non-deployment production-operations path, run: sh scripts/operations-quickstart.sh\n'
+  printf 'For the GitHub/Vercel deployment-recovery subsystem, open the setup wizard and complete GitHub, Vercel, AI provider, and health-check setup.\n'
+fi
 printf 'CLI/operator commands read NOPAGER_ADMIN_TOKEN from .env automatically.\n'
 printf 'Back up .env together with the PostgreSQL volume; losing NOPAGER_MASTER_KEY makes encrypted integration credentials unrecoverable.\n'
 printf 'Logs: docker compose logs -f server worker web\n'
