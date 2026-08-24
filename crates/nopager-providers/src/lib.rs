@@ -7,6 +7,7 @@ use url::Url;
 #[allow(dead_code)]
 #[path = "core.rs"]
 mod core;
+mod operations;
 mod setup_validation;
 
 pub(crate) use core::validate_repair_path;
@@ -14,6 +15,11 @@ pub use core::{
     CommitContext, ControlledCommand, DiagnosisInput, DiagnosisResult, Evidence,
     OutputValidationError, RepairInput, RepairProposal, RiskLevel, SourceFile,
     VERIFIED_GITHUB_DIFF_SOURCE,
+};
+pub use operations::{
+    AvailableOperationsAction, AvailableVerificationSignal, OperationsActionKind,
+    OperationsDecision, OperationsIncidentClass, OperationsInput, OperationsValidationError,
+    OperationsVerificationKind, SelectedVerificationSignal,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -39,6 +45,8 @@ pub enum ProviderError {
     InsufficientSourceContext,
     #[error("model provider returned invalid structured output: {0}")]
     InvalidOutput(#[from] OutputValidationError),
+    #[error("model provider returned an invalid operations decision: {0}")]
+    InvalidOperationsOutput(String),
     #[error("model provider response could not be decoded")]
     Decode,
 }
@@ -49,6 +57,14 @@ pub trait ModelProvider: Send + Sync {
     async fn test_connection(&self) -> Result<(), ProviderError>;
     async fn diagnose(&self, input: &DiagnosisInput) -> Result<DiagnosisResult, ProviderError>;
     async fn propose_patch(&self, input: &RepairInput) -> Result<RepairProposal, ProviderError>;
+    async fn plan_operations(
+        &self,
+        _input: &OperationsInput,
+    ) -> Result<OperationsDecision, ProviderError> {
+        Err(ProviderError::Request(
+            "operations planning is unavailable for this provider wrapper".into(),
+        ))
+    }
 }
 
 pub async fn discover_available_models(
@@ -63,6 +79,7 @@ macro_rules! provider_wrapper {
         #[derive(Clone)]
         pub struct $name {
             inner: core::$name,
+            operations: operations::OperationsHttpProvider,
             setup: setup_validation::SetupProvider,
         }
 
@@ -74,17 +91,28 @@ macro_rules! provider_wrapper {
                 let model = model.into();
                 let base_url = Url::parse($base).expect("constant provider URL");
                 let inner = core::$name::new(api_key.clone(), model.clone())?;
+                let operations = operations::OperationsHttpProvider::new(
+                    operations::Backend::$kind,
+                    api_key.clone(),
+                    model.clone(),
+                    base_url.clone(),
+                )?;
                 let setup = setup_validation::SetupProvider::new(
                     setup_validation::ProviderKind::$kind,
                     api_key,
                     model,
                     base_url,
                 )?;
-                Ok(Self { inner, setup })
+                Ok(Self {
+                    inner,
+                    operations,
+                    setup,
+                })
             }
 
             pub fn with_base_url(mut self, base_url: Url) -> Self {
                 self.inner = self.inner.with_base_url(base_url.clone());
+                self.operations = self.operations.with_base_url(base_url.clone());
                 self.setup = self.setup.with_base_url(base_url);
                 self
             }
@@ -112,6 +140,13 @@ macro_rules! provider_wrapper {
                 input: &RepairInput,
             ) -> Result<RepairProposal, ProviderError> {
                 ModelProvider::propose_patch(&self.inner, input).await
+            }
+
+            async fn plan_operations(
+                &self,
+                input: &OperationsInput,
+            ) -> Result<OperationsDecision, ProviderError> {
+                self.operations.plan(input).await
             }
         }
     };
