@@ -54,18 +54,11 @@ pub(super) async fn protect_operations_app(
     let health_check_url = match Url::parse(&request.health_check_url) {
         Ok(url) if validate_health_url(&url).is_ok() => url,
         _ => {
-            return api_error(StatusCode::BAD_REQUEST, "unsafe_health_check_url")
-                .into_response();
+            return api_error(StatusCode::BAD_REQUEST, "unsafe_health_check_url").into_response();
         }
     };
 
-    match check_http(
-        &health_check_url,
-        200,
-        std::time::Duration::from_secs(10),
-    )
-    .await
-    {
+    match check_http(&health_check_url, 200, std::time::Duration::from_secs(10)).await {
         Ok(observation) if observation.success => {}
         Ok(_) | Err(_) => {
             return api_error(StatusCode::UNPROCESSABLE_ENTITY, "production_health_failed")
@@ -107,16 +100,14 @@ pub(super) async fn protect_operations_app(
         Ok(value) => value,
         Err(error) => {
             tracing::error!(%error, "failed to encrypt operations provider credentials");
-            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
-                .into_response();
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error").into_response();
         }
     };
     let docker_credentials = match cipher.encrypt(&SecretString::from("{}".to_owned())) {
         Ok(value) => value,
         Err(error) => {
             tracing::error!(%error, "failed to encrypt operations connector placeholder");
-            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
-                .into_response();
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error").into_response();
         }
     };
 
@@ -136,8 +127,7 @@ pub(super) async fn protect_operations_app(
         Ok(tx) => tx,
         Err(error) => {
             tracing::error!(%error, "failed to begin operations setup transaction");
-            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
-                .into_response();
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error").into_response();
         }
     };
 
@@ -157,8 +147,7 @@ pub(super) async fn protect_operations_app(
         Err(error) => {
             tracing::error!(%error, "failed to inspect existing protected app");
             let _ = tx.rollback().await;
-            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
-                .into_response();
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error").into_response();
         }
     };
     if exists {
