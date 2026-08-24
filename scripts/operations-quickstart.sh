@@ -233,12 +233,14 @@ if [ "$app_exists" = "true" ]; then
     -H "authorization: Bearer $admin_token" \
     "$api_base/settings") \
     || fail "existing protected-app settings could not be loaded."
-  if ! printf '%s' "$settings_json" | python3 - "$production_url" "$health_url" "$docker_target" "$provider" "$model" <<'PY'
+  printf '%s' "$settings_json" > "/tmp/nopager-ops-status.$$"
+  if ! python3 - "$production_url" "$health_url" "$docker_target" "$provider" "$model" "/tmp/nopager-ops-status.$$" <<'PY'
 import json
+from pathlib import Path
 import sys
 
-expected_production, expected_health, expected_target, expected_provider, expected_model = sys.argv[1:]
-data = json.load(sys.stdin)
+expected_production, expected_health, expected_target, expected_provider, expected_model, path = sys.argv[1:]
+data = json.loads(Path(path).read_text())
 project = data.get("project") or {}
 integrations = data.get("integrations") or []
 health_checks = data.get("healthChecks") or []
@@ -296,7 +298,7 @@ fi
 
 note ""
 note "NoPager production operations is configured."
-note "Console: http://localhost:${web_port}/"
+note "Sign in: http://localhost:${web_port}/setup"
 note "Login username: $admin_username"
 note "Mode: $safety_mode"
 note "Protected Docker target: $docker_target"
