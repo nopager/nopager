@@ -33,6 +33,7 @@ jobs:
       - name: Validate shell entrypoints
         run: |
           sh -n scripts/quickstart.sh
+          sh -n scripts/operations-quickstart.sh
           sh -n scripts/create-dogfood-repo.sh
           sh -n scripts/test-create-dogfood-repo.sh
       - name: Exercise dogfood repository bootstrap safety
@@ -101,6 +102,18 @@ jobs:
           socket.on('error', () => finish(0));
           setTimeout(() => finish(0), 3000);
           NODE
+      - name: Verify operations Docker runtime path
+        run: |
+          docker run -d --name nopager-ci-ops-target \
+            --label com.docker.compose.project=customer-ci \
+            alpine:3.22 sleep 600 >/dev/null
+          test "$(docker inspect --format '{{index .Config.Labels "com.nopager.control-plane"}}' nopager-ci-ops-target)" != "true"
+          test "$(docker compose exec -T worker docker container inspect --format '{{.State.Status}}' -- nopager-ci-ops-target)" = "running"
+          worker=$(docker compose ps -q worker)
+          worker_project=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$worker")
+          target_project=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' nopager-ci-ops-target)
+          test "$worker_project" != "$target_project"
+          docker rm -f nopager-ci-ops-target >/dev/null
       - name: Verify Rust setup API
         run: curl --fail --show-error --silent http://127.0.0.1:8080/api/v1/setup/status >/dev/null
       - name: Verify web console and API proxy
@@ -158,7 +171,9 @@ jobs:
         run: docker compose ps
       - name: Tear down smoke stack
         if: always()
-        run: docker compose down -v --remove-orphans
+        run: |
+          docker rm -f nopager-ci-ops-target >/dev/null 2>&1 || true
+          docker compose down -v --remove-orphans
 
   publish-images:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
