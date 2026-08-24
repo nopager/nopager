@@ -1,3 +1,4 @@
+pub mod docker_ops;
 pub mod github;
 pub mod github_pull;
 pub mod github_revert;
