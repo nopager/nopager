@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
+mod operations_runtime;
 mod production;
 mod source_recovery;
 
@@ -145,6 +146,26 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn execute_job(database: &Database, job: &Job) -> anyhow::Result<()> {
+    if job.job_type == "incident-context"
+        && operations_runtime::is_health_incident(database, &job.payload_json).await?
+    {
+        return operations_runtime::route_incident_context(database, &job.payload_json).await;
+    }
+    if operations_runtime::routes_operations_job(&job.payload_json) {
+        match job.job_type.as_str() {
+            "diagnose" => {
+                return operations_runtime::plan_operations(database, &job.payload_json).await;
+            }
+            "production-action" => {
+                return operations_runtime::execute_operation(database, &job.payload_json).await;
+            }
+            "verify" => {
+                return operations_runtime::verify_operation(database, &job.payload_json).await;
+            }
+            _ => {}
+        }
+    }
+
     match job.job_type.as_str() {
         "production-action"
             if job.payload_json.get("action").and_then(Value::as_str) == Some("rollback") =>
