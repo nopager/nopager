@@ -6,7 +6,7 @@ use tokio::{process::Command, time::timeout};
 
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_COMMAND_OUTPUT_BYTES: usize = 16 * 1024;
-const INSPECT_FORMAT: &str = r#"{{.Id}}	{{.Name}}	{{.State.Status}}	{{index .Config.Labels "com.docker.compose.project"}}	{{index .Config.Labels "com.docker.compose.service"}}	{{index .Config.Labels "com.nopager.control-plane"}}"#;
+const INSPECT_FORMAT: &str = r#"{{.Id}}\t{{.Name}}\t{{.State.Status}}\t{{index .Config.Labels "com.docker.compose.project"}}\t{{index .Config.Labels "com.docker.compose.service"}}\t{{index .Config.Labels "com.nopager.control-plane"}}"#;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -109,15 +109,8 @@ impl DockerOperationsClient {
         let self_state = self.inspect_self_if_available().await;
         ensure_safe_mutation_target(&before, self_state.as_ref())?;
 
-        self.run(&[
-            "container",
-            "restart",
-            "--time",
-            "10",
-            "--",
-            target,
-        ])
-        .await?;
+        self.run(&["container", "restart", "--time", "10", "--", target])
+            .await?;
 
         let after = self.inspect_container(target).await?;
         if !after.running() {
