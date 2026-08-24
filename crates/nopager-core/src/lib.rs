@@ -71,6 +71,7 @@ impl IncidentState {
                 | (S::CollectingContext, S::Diagnosing)
                 | (S::Diagnosing, S::Planning)
                 | (S::Planning, S::Repairing)
+                | (S::Planning, S::WaitingApproval)
                 | (S::Repairing, S::Testing)
                 | (S::Repairing, S::VerifyingProduction)
                 | (S::Testing, S::Repairing)
@@ -79,6 +80,7 @@ impl IncidentState {
                 | (S::VerifyingPreview, S::Repairing)
                 | (S::VerifyingPreview, S::WaitingApproval)
                 | (S::VerifyingPreview, S::ProductionDeploying)
+                | (S::WaitingApproval, S::Repairing)
                 | (S::WaitingApproval, S::ProductionDeploying)
                 | (S::ProductionDeploying, S::VerifyingProduction)
                 | (S::VerifyingProduction, S::Resolved)
@@ -349,6 +351,12 @@ mod tests {
     fn bounded_operations_can_verify_without_entering_deployment_states() {
         assert!(IncidentState::Repairing.can_transition_to(IncidentState::VerifyingProduction));
         assert!(IncidentState::VerifyingProduction.can_transition_to(IncidentState::Resolved));
+    }
+
+    #[test]
+    fn bounded_operations_have_a_real_safe_mode_approval_path() {
+        assert!(IncidentState::Planning.can_transition_to(IncidentState::WaitingApproval));
+        assert!(IncidentState::WaitingApproval.can_transition_to(IncidentState::Repairing));
     }
 
     fn external_health_verification() -> OperationsVerificationPlan {
