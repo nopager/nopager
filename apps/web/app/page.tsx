@@ -58,8 +58,9 @@ export default async function OverviewPage() {
               : "Your app is protected."}
           </h2>
           <p>
-            NoPager monitors production, deployments, and health checks around
-            the clock.
+            NoPager monitors production signals and health checks around the
+            clock, then wakes AI operations reasoning only when an incident
+            needs attention.
           </p>
         </div>
         <div className="status-metric">
@@ -79,16 +80,16 @@ export default async function OverviewPage() {
           </p>
         </Card>
         <Card>
-          <p className="metric-label">Last deployment</p>
+          <p className="metric-label">Latest deployment</p>
           <strong className="metric-value">
             {overview.latestDeployment
               ? display(overview.latestDeployment.status)
-              : "None"}
+              : "Not required"}
           </strong>
           <p>
             {overview.latestDeployment
               ? new Date(overview.latestDeployment.createdAt).toLocaleString()
-              : "No deployment recorded"}
+              : "Operations protection can run without a deployment provider"}
           </p>
         </Card>
         <Card>

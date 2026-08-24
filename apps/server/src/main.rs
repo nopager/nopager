@@ -40,6 +40,8 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 use url::Url;
 
+mod operations_setup;
+
 #[derive(Serialize)]
 struct HealthResponse {
     status: &'static str,
@@ -1370,6 +1372,10 @@ async fn main() -> anyhow::Result<()> {
             post(discover_health_connection),
         )
         .route("/api/v1/setup/app", post(protect_app))
+        .route(
+            "/api/v1/setup/operations-app",
+            post(operations_setup::protect_operations_app),
+        )
         .route("/api/v1/auth/login", post(login))
         .route("/api/v1/protection/pause", post(pause))
         .route("/api/v1/protection/resume", post(resume))

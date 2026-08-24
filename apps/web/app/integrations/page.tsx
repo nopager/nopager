@@ -21,8 +21,13 @@ export default async function IntegrationsPage() {
     );
   }
 
+  const docker = settings.integrations.find(
+    (item) => item.type === "docker_ops",
+  );
   const github = settings.integrations.find((item) => item.type === "github");
   const vercel = settings.integrations.find((item) => item.type === "vercel");
+  const dockerTarget = stringValue(docker?.metadata.targetId);
+
   return (
     <div className="page">
       <PageHeader
@@ -31,25 +36,49 @@ export default async function IntegrationsPage() {
         description="The production context NoPager can observe and act on safely."
       />
       <div className="integration-grid">
-        <Integration
-          name="GitHub"
-          logo="GH"
-          status={github?.status}
-          rows={[
-            ["Repository", github?.externalProjectId],
-            ["Installation", github?.externalAccountId],
-          ]}
-        />
-        <Integration
-          name="Vercel"
-          logo="▲"
-          status={vercel?.status}
-          rows={[
-            ["Project", vercel?.externalProjectId],
-            ["Production", settings.project.productionUrl],
-          ]}
-        />
+        {docker && (
+          <Integration
+            name="Docker operations"
+            logo="DO"
+            status={docker.status}
+            description="Bounded runtime inspection and container recovery"
+            rows={[
+              ["Target", dockerTarget ?? docker.externalProjectId],
+              ["Control plane", docker.externalAccountId],
+              ["Production", settings.project.productionUrl],
+            ]}
+          />
+        )}
+        {github && (
+          <Integration
+            name="GitHub"
+            logo="GH"
+            status={github.status}
+            description="Optional deployment-recovery source and review surface"
+            rows={[
+              ["Repository", github.externalProjectId],
+              ["Installation", github.externalAccountId],
+            ]}
+          />
+        )}
+        {vercel && (
+          <Integration
+            name="Vercel"
+            logo="▲"
+            status={vercel.status}
+            description="Optional deployment, Preview and rollback subsystem"
+            rows={[
+              ["Project", vercel.externalProjectId],
+              ["Production", settings.project.productionUrl],
+            ]}
+          />
+        )}
       </div>
+      {!docker && !github && !vercel && (
+        <Card>
+          <p>No production execution connector is configured.</p>
+        </Card>
+      )}
       <Card>
         <SectionTitle
           title="Health checks"
@@ -92,11 +121,13 @@ function Integration({
   name,
   logo,
   status,
+  description,
   rows,
 }: {
   name: string;
   logo: string;
   status?: string;
+  description: string;
   rows: Array<[string, string | null | undefined]>;
 }) {
   return (
@@ -105,11 +136,7 @@ function Integration({
         <span className="integration-logo">{logo}</span>
         <div>
           <h2>{name}</h2>
-          <p>
-            {name === "GitHub"
-              ? "Source, commits, pull requests"
-              : "Deployments, previews, rollback"}
-          </p>
+          <p>{description}</p>
         </div>
         <span className={status === "CONNECTED" ? "connected" : "status-badge"}>
           {status ?? "Not configured"}
@@ -125,6 +152,10 @@ function Integration({
       </dl>
     </Card>
   );
+}
+
+function stringValue(value: unknown) {
+  return typeof value === "string" ? value : null;
 }
 
 function healthMeaning(status: string) {

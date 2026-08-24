@@ -106,12 +106,20 @@ pub async fn process_plan(database: &Database, payload: &Value) -> anyhow::Resul
             None,
             "Escalate when the incident cannot be safely handled with configured capabilities",
         ),
-        AvailableOperationsAction::new(
+    ];
+    let deployment_recovery_available = deployment_recovery_configured(
+        &work.repo_owner,
+        &work.repo_name,
+        work.vercel_project_id.as_deref(),
+        &work.github_metadata,
+    );
+    if deployment_recovery_available {
+        available_actions.push(AvailableOperationsAction::new(
             OperationsActionKind::DelegateDeploymentRecovery,
             None,
             "Use the deployment-recovery subsystem only when a code or deployment regression is supported by evidence",
-        ),
-    ];
+        ));
+    }
     if restart_enabled
         && let (Some(target), Some(_)) = (target.as_deref(), container_state.as_ref())
     {
@@ -183,6 +191,15 @@ pub async fn process_plan(database: &Database, payload: &Value) -> anyhow::Resul
 
     match decision.action {
         OperationsActionKind::DelegateDeploymentRecovery => {
+            if !deployment_recovery_available {
+                database
+                    .escalate_incident(
+                        incident_id,
+                        "AI operations triage requested deployment recovery, but this protected app has no GitHub/Vercel deployment-recovery subsystem configured",
+                    )
+                    .await?;
+                return Ok(());
+            }
             database
                 .record_audit_event(
                     work.project_id,
@@ -864,6 +881,20 @@ fn configured_container_target() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn deployment_recovery_configured(
+    repo_owner: &str,
+    repo_name: &str,
+    vercel_project_id: Option<&str>,
+    github_metadata: &Value,
+) -> bool {
+    !repo_owner.trim().is_empty()
+        && !repo_name.trim().is_empty()
+        && vercel_project_id.is_some_and(|value| !value.trim().is_empty())
+        && github_metadata
+            .as_object()
+            .is_some_and(|metadata| !metadata.is_empty())
+}
+
 fn env_true(name: &str) -> bool {
     std::env::var(name).is_ok_and(|value| {
         matches!(
@@ -928,5 +959,22 @@ mod tests {
         for model_value in [0_u8, 1, 2, 10] {
             assert!(u64::from(model_value.clamp(2, 3)) >= 2);
         }
+    }
+
+    #[test]
+    fn operations_only_projects_cannot_delegate_to_deployment_recovery() {
+        assert!(!deployment_recovery_configured("", "", None, &json!({})));
+        assert!(!deployment_recovery_configured(
+            "owner",
+            "repo",
+            None,
+            &json!({ "repoId": 1 })
+        ));
+        assert!(deployment_recovery_configured(
+            "owner",
+            "repo",
+            Some("vercel-project"),
+            &json!({ "repoId": 1 })
+        ));
     }
 }
