@@ -73,13 +73,13 @@ export default async function IncidentDetailPage({
             {operation ? (
               <p>
                 NoPager proposes a bounded {humanize(operation.actionKind)} on{" "}
-                <strong>{operation.targetId ?? "the configured target"}</strong>.
-                Safe Mode keeps production unchanged until you approve it.
+                <strong>{operation.targetId ?? "the configured target"}</strong>
+                . Safe Mode keeps production unchanged until you approve it.
               </p>
             ) : (
               <p>
-                The preview passed policy checks. Safe Mode prevents an unapproved
-                production change.
+                The preview passed policy checks. Safe Mode prevents an
+                unapproved production change.
               </p>
             )}
           </div>
@@ -183,7 +183,8 @@ export default async function IncidentDetailPage({
                   </details>
                 ) : (
                   <p className="muted">
-                    Verification begins only after a permitted operation executes.
+                    Verification begins only after a permitted operation
+                    executes.
                   </p>
                 )}
               </Card>
@@ -265,8 +266,8 @@ export default async function IncidentDetailPage({
             </p>
             {operation && (
               <p className="muted">
-                Operations are restricted to persisted configured targets and are
-                independently verified after execution.
+                Operations are restricted to persisted configured targets and
+                are independently verified after execution.
               </p>
             )}
             {incident.status === "WAITING_APPROVAL" && (
@@ -357,7 +358,8 @@ function incidentOutcome(
           message:
             incident.rootCauseSummary ??
             "NoPager executed the bounded production operation and independently verified recovery.",
-          nextStep: "No action needed. The full operation remains available for audit.",
+          nextStep:
+            "No action needed. The full operation remains available for audit.",
         };
       case "WAITING_APPROVAL":
         return {
@@ -371,17 +373,21 @@ function incidentOutcome(
       case "VERIFYING_PRODUCTION":
         return {
           label: "Recovery in progress",
-          headline: "NoPager is executing or verifying the bounded production operation.",
+          headline:
+            "NoPager is executing or verifying the bounded production operation.",
           message:
             "The operation is constrained to its persisted configured target and will not be repeated blindly.",
-          nextStep: "No action needed while independent verification is running.",
+          nextStep:
+            "No action needed while independent verification is running.",
         };
       case "CANCELLED":
         return {
           label: "Operation rejected",
           headline: "The proposed production operation was not executed.",
-          message: "Safe Mode kept production unchanged after the operation was rejected.",
-          nextStep: "Handle the incident manually or wait for a new independently triggered incident.",
+          message:
+            "Safe Mode kept production unchanged after the operation was rejected.",
+          nextStep:
+            "Handle the incident manually or wait for a new independently triggered incident.",
         };
       case "PAUSED":
         return {
@@ -395,7 +401,8 @@ function incidentOutcome(
       case "ESCALATED":
         return {
           label: "Human action required",
-          headline: "NoPager stopped before repeating or making an unsafe operation.",
+          headline:
+            "NoPager stopped before repeating or making an unsafe operation.",
           message:
             incident.rootCauseSummary ??
             "The bounded recovery path could not be proven safe or successful.",
@@ -409,7 +416,8 @@ function incidentOutcome(
           message:
             incident.rootCauseSummary ??
             "NoPager is collecting bounded operational evidence and deciding whether a configured recovery action is justified.",
-          nextStep: "No action needed unless Safe Mode requests approval or the incident escalates.",
+          nextStep:
+            "No action needed unless Safe Mode requests approval or the incident escalates.",
         };
     }
   }
