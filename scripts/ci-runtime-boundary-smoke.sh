@@ -135,24 +135,35 @@ raw_response=$(client_request raw_exec "$target_id" 018f0000-0000-7000-8000-0000
 printf '%s' "$raw_response" | assert_rejection invalid_request
 
 restart_id=018f0000-0000-7000-8000-000000000006
-restart_before=$(docker inspect --format '{{.RestartCount}}' "$target_id")
+restart_before=$(docker inspect --format '{{.State.StartedAt}}' "$target_id")
+event_log="$PWD/.runtime/ci-restart-events.log"
+docker events --filter type=container --filter container="$target_id" --filter event=restart \
+  --format '{{.Action}}' > "$event_log" &
+event_pid=$!
+sleep 1
 restart_response=$(client_request restart_container "$target_id" "$restart_id")
 printf '%s' "$restart_response" | python3 -c 'import json,sys; value=json.load(sys.stdin); assert value["result"]["status"] == "success", value; assert value["result"]["operation"] == "restart_container", value; assert value["duplicate"] is False, value'
+restart_once=$(docker inspect --format '{{.State.StartedAt}}' "$target_id")
+[ "$restart_once" != "$restart_before" ] || fail "target did not expose a restart transition"
 duplicate_response=$(client_request restart_container "$target_id" "$restart_id")
 printf '%s' "$duplicate_response" | python3 -c 'import json,sys; value=json.load(sys.stdin); assert value["result"]["status"] == "success", value; assert value["duplicate"] is True, value'
-restart_after=$(docker inspect --format '{{.RestartCount}}' "$target_id")
-[ "$restart_after" -eq $((restart_before + 1)) ] \
-  || fail "duplicate request caused an unexpected restart count"
+restart_after=$(docker inspect --format '{{.State.StartedAt}}' "$target_id")
+[ "$restart_after" = "$restart_once" ] || fail "duplicate request caused another restart transition"
+sleep 1
+kill "$event_pid" >/dev/null 2>&1 || true
+wait "$event_pid" 2>/dev/null || true
+restart_events=$(grep -c '^restart$' "$event_log" || true)
+[ "$restart_events" -eq 1 ] || fail "expected exactly one Docker restart event, observed $restart_events"
 
 ambiguous_id=018f0000-0000-7000-8000-000000000007
 cat > ".runtime/ci-state/$ambiguous_id.json" <<JSON
 {"requestId":"$ambiguous_id","targetId":"$target_id","status":"started","response":null}
 JSON
-ambiguous_before=$(docker inspect --format '{{.RestartCount}}' "$target_id")
+ambiguous_before=$(docker inspect --format '{{.State.StartedAt}}' "$target_id")
 ambiguous_response=$(client_request restart_container "$target_id" "$ambiguous_id")
 printf '%s' "$ambiguous_response" | assert_rejection duplicate_ambiguous
-ambiguous_after=$(docker inspect --format '{{.RestartCount}}' "$target_id")
-[ "$ambiguous_after" -eq "$ambiguous_before" ] \
+ambiguous_after=$(docker inspect --format '{{.State.StartedAt}}' "$target_id")
+[ "$ambiguous_after" = "$ambiguous_before" ] \
   || fail "ambiguous journal request was replayed"
 
 python3 - "$target_id" "$token" "$runtime_gid" <<'PY'

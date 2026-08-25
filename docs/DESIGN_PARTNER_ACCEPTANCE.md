@@ -14,8 +14,8 @@ Run this only on the disposable/staging VPS described in [the release guide](DES
    ```
 
 3. When prompted, cause three consecutive external health-check failures. The script waits for detection, bounded evidence and AI reasoning to produce a typed `restart_container` plan in `WAITING_APPROVAL`.
-4. The script first enables the Kill Switch, proves approval is rejected and restart count remains unchanged, then resumes protection.
-5. After the explicit human phrase, it approves exactly one persisted action, waits for helper execution, requires exactly one Docker restart, and accepts only independent helper state plus external HTTP verification ending in `RESOLVED`/`VERIFIED`.
+4. The script first enables the Kill Switch, proves approval is rejected and the container start timestamp remains unchanged, then resumes protection.
+5. After the explicit human phrase, it approves exactly one persisted action, waits for helper execution, requires one changed start timestamp and exactly one Docker `restart` event, and accepts only independent helper state plus external HTTP verification ending in `RESOLVED`/`VERIFIED`.
 
 The script refuses a dirty working tree so the record names an exact tested commit and `0.2.0-design-partner.1` version. It also runs the deterministic protocol/helper failure suite and proves the live worker has no Docker socket, Docker CLI, or Docker socket group.
 

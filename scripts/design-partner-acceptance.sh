@@ -70,11 +70,23 @@ assert op.get("targetId") == sys.argv[1], op
 assert op.get("status") == "APPROVAL_REQUIRED", op
 ' "$target_id" || exit 1
 
-before=$(docker inspect --format '{{.RestartCount}}' "$target_id")
+before=$(docker inspect --format '{{.State.StartedAt}}' "$target_id")
+event_log="/tmp/nopager-acceptance-restart-events.$$"
+event_pid=
+cleanup_events() {
+  [ -z "$event_pid" ] || kill "$event_pid" >/dev/null 2>&1 || true
+  [ -z "$event_pid" ] || wait "$event_pid" 2>/dev/null || true
+  rm -f "$event_log"
+}
+trap cleanup_events EXIT HUP INT TERM
+docker events --filter type=container --filter container="$target_id" --filter event=restart \
+  --format '{{.Action}}' > "$event_log" &
+event_pid=$!
+sleep 1
 curl --fail --silent --show-error -X POST -H "$auth" "$api_base/protection/pause" >/dev/null
 status=$(curl --silent --output /tmp/nopager-acceptance-approve.json --write-out '%{http_code}' -X POST -H "$auth" "$api_base/incidents/$incident_id/approve")
 [ "$status" = "409" ] || fail "Kill Switch did not block approval (HTTP $status)."
-after_block=$(docker inspect --format '{{.RestartCount}}' "$target_id")
+after_block=$(docker inspect --format '{{.State.StartedAt}}' "$target_id")
 [ "$after_block" = "$before" ] || fail "target restarted while Kill Switch was active."
 curl --fail --silent --show-error -X POST -H "$auth" "$api_base/protection/resume" >/dev/null
 
@@ -93,8 +105,14 @@ while [ "$elapsed" -lt "$timeout_seconds" ]; do
   sleep 5
   elapsed=$((elapsed + 5))
 done
-after=$(docker inspect --format '{{.RestartCount}}' "$target_id")
-[ "$after" -eq $((before + 1)) ] || fail "expected exactly one target restart; before=$before after=$after"
+after=$(docker inspect --format '{{.State.StartedAt}}' "$target_id")
+[ "$after" != "$before" ] || fail "target did not expose a restart transition."
+sleep 1
+kill "$event_pid" >/dev/null 2>&1 || true
+wait "$event_pid" 2>/dev/null || true
+event_pid=
+restart_events=$(grep -c '^restart$' "$event_log" || true)
+[ "$restart_events" -eq 1 ] || fail "expected exactly one Docker restart event; observed $restart_events"
 DETAIL_JSON=$detail python3 -c '
 import json,os
 d=json.loads(os.environ["DETAIL_JSON"])
@@ -104,6 +122,6 @@ assert op.get("execution") is not None, op
 assert op.get("verification") is not None, op
 ' || exit 1
 
-note "Complete loop reached $final_status with exactly one restart."
+note "Complete loop reached $final_status with exactly one observed Docker restart event."
 [ "$final_status" = "RESOLVED" ] || fail "independent verification escalated/failed; preserve evidence and investigate."
 note "PASS version=$version commit=$commit incident=$incident_id"
