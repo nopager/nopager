@@ -22,7 +22,19 @@ use uuid::Uuid;
 
 const DOCKER_TIMEOUT: Duration = Duration::from_secs(25);
 const MAX_COMMAND_OUTPUT_BYTES: usize = 16 * 1024;
-const INSPECT_FORMAT: &str = r#"{{.Id}}\t{{.Name}}\t{{.State.Status}}\t{{index .Config.Labels "com.docker.compose.project"}}\t{{index .Config.Labels "com.docker.compose.service"}}\t{{index .Config.Labels "com.nopager.control-plane"}}"#;
+const INSPECT_FORMAT: &str = concat!(
+    "{{.Id}}",
+    "\t",
+    "{{.Name}}",
+    "\t",
+    "{{.State.Status}}",
+    "\t",
+    r#"{{index .Config.Labels "com.docker.compose.project"}}"#,
+    "\t",
+    r#"{{index .Config.Labels "com.docker.compose.service"}}"#,
+    "\t",
+    r#"{{index .Config.Labels "com.nopager.control-plane"}}"#,
+);
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -927,6 +939,8 @@ mod tests {
 
     #[test]
     fn inspect_parser_exposes_only_bounded_state_fields() {
+        assert_eq!(INSPECT_FORMAT.matches('\t').count(), 5);
+        assert!(!INSPECT_FORMAT.contains(r"\t"));
         let output = format!("{TARGET_ID}\t/customer-app\trunning\tcustomer\tweb\t<no value>\n");
         let state = parse_inspect_output(&output).unwrap();
         assert_eq!(state.id, TARGET_ID);
