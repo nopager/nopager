@@ -2,6 +2,7 @@ node_modules/
 .next/
 target/
 .turbo/
+.runtime/
 .env
 .env.local
 !.env.example

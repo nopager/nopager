@@ -4,6 +4,7 @@ members = [
   "apps/server",
   "apps/worker",
   "apps/cli",
+  "apps/runtime-helper",
   "crates/nopager-core",
   "crates/nopager-policy",
   "crates/nopager-monitor",
@@ -14,10 +15,11 @@ members = [
   "crates/nopager-providers",
   "crates/nopager-sandbox",
   "crates/nopager-connectors",
+  "crates/nopager-runtime-protocol",
 ]
 
 [workspace.package]
-version = "0.1.0-alpha.1"
+version = "0.2.0-design-partner.1"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/nopager/nopager"
@@ -50,7 +52,7 @@ subtle = "2.6"
 thiserror = "2.0"
 tar = "0.4"
 time = { version = "0.3", features = ["serde"] }
-tokio = { version = "1.48", features = ["io-util", "macros", "process", "rt-multi-thread", "signal", "time"] }
+tokio = { version = "1.48", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tower-http = { version = "0.6", features = ["trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }

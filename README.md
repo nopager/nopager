@@ -48,7 +48,9 @@ The current path includes:
 - public HTTPS health monitoring with failure/recovery debouncing;
 - BYOK OpenAI, Anthropic, or Gemini model provider;
 - incident-triggered model use rather than continuous model reasoning;
-- one configured Docker target with a fixed trusted restart operation;
+- one immutable enrolled Docker target with a fixed trusted restart operation;
+- a small host-side helper that alone holds Docker socket group authority;
+- an ordinary worker with no Docker socket mount, Docker group, or Docker CLI;
 - no model-generated shell command surface;
 - target checks that refuse NoPager control-plane containers and the NoPager Compose project;
 - deterministic policy plus Kill Switch;
@@ -59,13 +61,13 @@ The current path includes:
 - independent public-health and container-state verification;
 - incident timeline, execution/verification record, and audit trail.
 
-See [Production-operations quickstart](docs/OPERATIONS_QUICKSTART.md).
+See [Production-operations quickstart](docs/OPERATIONS_QUICKSTART.md), [runtime-helper security architecture](docs/RUNTIME_HELPER_SECURITY.md), and [Design Partner release](docs/DESIGN_PARTNER_RELEASE.md).
 
 ## Operations-first quick start
 
 Requirements:
 
-- Linux host with Docker Engine 26+ and Docker Compose v2;
+- dedicated disposable/staging Linux host with systemd, Docker Engine 26+, Docker Compose v2, Python 3, and Rust/Cargo 1.92;
 - a public HTTPS production URL and health URL;
 - one application Docker container on the same Docker daemon NoPager can access;
 - NoPager running in a separate Compose project from the protected app;
@@ -90,9 +92,10 @@ The operations quickstart fails closed before protection is persisted unless it 
 4. the health endpoint currently returns HTTP 200;
 5. the Docker target exists;
 6. the target is not NoPager itself or part of NoPager's Compose project;
-7. the worker can inspect the target through the Docker runtime path.
+7. the host helper independently enrolls the immutable target;
+8. the worker stays running after helper preflight without Docker socket/CLI/group authority.
 
-The provider key is sent to the local NoPager setup API, encrypted with `NOPAGER_MASTER_KEY`, and stored in PostgreSQL. The operations quickstart does not keep a second provider-key copy in the worker `.env` after setup. The Docker target and restart capability remain explicit local worker hard gates.
+The provider key is sent to the local NoPager setup API, encrypted with `NOPAGER_MASTER_KEY`, and stored in PostgreSQL. The operations quickstart does not keep a second provider-key copy in worker `.env`. The immutable target and restart capability remain worker hard gates; the helper keeps a separate enrollment and protocol credential.
 
 After setup, sign in through:
 
@@ -127,7 +130,7 @@ NoPager is not intended to run a heavyweight model process on every protected se
 
 The always-on layer should be cheap and deterministic: health checks, provider events, metrics, bounded polling, and thresholds. Expensive model reasoning starts only after evidence says an incident needs attention.
 
-The current self-hosted control plane has its own API, worker, web console, PostgreSQL, and Docker runtime access. The protected application does not need a model process or a heavyweight NoPager agent inside it.
+The current self-hosted control plane has its own API, worker, web console, and PostgreSQL. Its ordinary containers have no Docker daemon access. A small host-side helper holds the narrow inspect/restart boundary. The protected application does not need a model process or heavyweight agent.
 
 ## Deployment recovery is a subsystem
 
@@ -178,15 +181,17 @@ External model calls receive bounded incident evidence. Before structured input 
 
 For deployment repair, the complete repository remains in the trusted self-hosted worker workspace; NoPager does not serialize the whole repository into a model prompt. The same minimum-evidence rule applies as operations expands into logs, metrics, cloud state, and security evidence.
 
-See [Code privacy and model boundary](docs/PRIVACY.md).
+See [Code privacy and model boundary](docs/PRIVACY.md) and [exact provider evidence/accounting](docs/MODEL_EVIDENCE_BOUNDARY.md).
 
 ## Architecture
 
 - `apps/server` — Rust API, local authentication, setup, webhook verification and production-control endpoints.
 - `apps/worker` — durable jobs, health monitoring, operations reasoning/execution, deployment recovery and verification.
+- `apps/runtime-helper` — Linux host TCB exposing only typed inspect/restart for one enrolled target.
 - `apps/cli` — self-hosting/operator CLI.
 - `apps/web` — operations console.
-- `crates/nopager-connectors` — trusted external/runtime connector surfaces, including the bounded Docker operations connector.
+- `crates/nopager-connectors` — external connectors and the unprivileged runtime-helper IPC client.
+- `crates/nopager-runtime-protocol` — closed, versioned helper request/response types.
 - `crates/nopager-policy` — deterministic production-action policy.
 - `crates/nopager-monitor` — health checks and signal safety.
 - PostgreSQL — durable configuration, incidents, actions, audit events and jobs.
@@ -200,7 +205,7 @@ The code that exists today is narrower than the long-term product:
 - the first general production-operations action is one configured Docker-container restart;
 - production-operations evidence is currently centered on public HTTP health plus Docker runtime state;
 - one administrator and one protected app per OSS installation;
-- first operations design partners need the protected application container on a Docker daemon accessible to the NoPager worker;
+- first operations design partners need the protected container on the same daemon as the separately installed host helper;
 - Cloudflare automation is not implemented yet;
 - general CPU/memory/disk/capacity remediation is not implemented yet;
 - general cloud instance scaling/failover is not implemented yet;

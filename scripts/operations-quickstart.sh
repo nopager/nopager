@@ -23,6 +23,7 @@ command -v docker >/dev/null 2>&1 || fail "Docker is required."
 docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is required."
 command -v curl >/dev/null 2>&1 || fail "curl is required for setup preflight checks."
 command -v python3 >/dev/null 2>&1 || fail "Python 3 is required for safe local JSON handling during setup."
+command -v cargo >/dev/null 2>&1 || fail "Rust 1.92/Cargo is required to build the host runtime helper for this Design Partner release."
 [ -f .env.example ] || fail ".env.example is missing; run this from the NoPager repository root."
 
 if [ ! -f .env ]; then
@@ -125,6 +126,11 @@ printf '%s' "$docker_target" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$' \
 printf '%s' "$admin_username" | grep -Eq '^[A-Za-z0-9_-]{3,64}$' \
   || fail "NOPAGER_ADMIN_USERNAME must be 3-64 letters, numbers, underscores, or hyphens."
 
+# Existing pre-helper Alpha installs may still contain a target name and enabled
+# flag. Start the ordinary worker without mutation capability until the new host
+# helper has independently enrolled the immutable target.
+set_env NOPAGER_ALLOW_CONTAINER_RESTART false
+
 note "Starting NoPager control plane..."
 NOPAGER_QUICKSTART_MODE=operations sh scripts/quickstart.sh
 
@@ -223,10 +229,25 @@ if [ -n "$worker_project" ] && [ "$worker_project" != "<no value>" ] \
   fail "refusing a Docker target in the same Compose project as the NoPager control plane."
 fi
 
-if ! docker compose exec -T worker docker container inspect --format '{{.State.Status}}' -- "$docker_target" >/dev/null 2>&1; then
-  fail "NoPager worker cannot inspect the Docker target through its runtime path. Check Docker socket access/DOCKER_GID."
+note "Host-side target enrollment preflight passed: $docker_target ($target_id)"
+
+note "Building deterministic host runtime helper..."
+cargo build --locked --release --package nopager-runtime-helper \
+  || fail "runtime-helper build failed."
+helper_binary="$(pwd)/target/release/nopager-runtime-helper"
+[ -x "$helper_binary" ] || fail "runtime-helper binary was not produced."
+if [ "$(id -u)" -eq 0 ]; then
+  helper_install_output=$(sh scripts/install-runtime-helper.sh "$docker_target" "$helper_binary")
+else
+  command -v sudo >/dev/null 2>&1 || fail "sudo is required to install the least-privilege systemd runtime helper."
+  helper_install_output=$(sudo sh scripts/install-runtime-helper.sh "$docker_target" "$helper_binary")
 fi
-note "Docker target preflight passed: $docker_target"
+printf '%s\n' "$helper_install_output"
+runtime_gid=$(printf '%s\n' "$helper_install_output" | awk -F= '$1 == "NOPAGER_RUNTIME_GID" { print $2; exit }')
+runtime_socket_dir=$(printf '%s\n' "$helper_install_output" | awk -F= '$1 == "NOPAGER_RUNTIME_SOCKET_DIR" { print $2; exit }')
+enrolled_target_id=$(printf '%s\n' "$helper_install_output" | awk -F= '$1 == "NOPAGER_DOCKER_TARGET" { print $2; exit }')
+[ -n "$runtime_gid" ] && [ -n "$runtime_socket_dir" ] && [ "$enrolled_target_id" = "$target_id" ] \
+  || fail "runtime-helper installer did not return a complete immutable enrollment."
 
 if [ "$app_exists" = "true" ]; then
   settings_json=$(curl --fail --show-error --silent \
@@ -234,7 +255,7 @@ if [ "$app_exists" = "true" ]; then
     "$api_base/settings") \
     || fail "existing protected-app settings could not be loaded."
   printf '%s' "$settings_json" > "/tmp/nopager-ops-status.$$"
-  if ! python3 - "$production_url" "$health_url" "$docker_target" "$provider" "$model" "/tmp/nopager-ops-status.$$" <<'PY'
+  if ! python3 - "$production_url" "$health_url" "$target_id" "$provider" "$model" "/tmp/nopager-ops-status.$$" <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -273,7 +294,7 @@ PY
   note "Existing operations-only configuration matches the requested target."
 else
   setup_payload=$(python3 -c 'import json,sys; print(json.dumps({"name":sys.argv[1],"provider":sys.argv[2],"providerApiKey":sys.argv[3],"providerModel":sys.argv[4],"productionUrl":sys.argv[5],"healthCheckUrl":sys.argv[6],"dockerTarget":sys.argv[7],"safetyMode":sys.argv[8]}))' \
-    "$app_name" "$provider" "$provider_key" "$model" "$production_url" "$health_url" "$docker_target" "$safety_input")
+    "$app_name" "$provider" "$provider_key" "$model" "$production_url" "$health_url" "$target_id" "$safety_input")
   post_admin_json setup/operations-app "$setup_payload" "operations-only protected-app setup" \
     || fail "operations-only protected app was not persisted."
   note "Operations-only protected app persisted with encrypted BYOK credentials."
@@ -281,27 +302,42 @@ fi
 
 # The model provider key is persisted encrypted in PostgreSQL by the setup API.
 # Do not duplicate that secret into worker environment variables. The Docker
-# target and capability flag remain explicit local hard gates for the worker.
+# exact immutable target and capability flag remain explicit local hard gates.
 set_env NOPAGER_AI_PROVIDER ""
 set_env NOPAGER_AI_MODEL ""
 set_env OPENAI_API_KEY ""
 set_env ANTHROPIC_API_KEY ""
 set_env GEMINI_API_KEY ""
-set_env NOPAGER_DOCKER_TARGET "$docker_target"
+set_env NOPAGER_DOCKER_TARGET "$target_id"
 set_env NOPAGER_ALLOW_CONTAINER_RESTART true
+set_env NOPAGER_RUNTIME_SOCKET_DIR "$runtime_socket_dir"
+set_env NOPAGER_RUNTIME_GID "$runtime_gid"
 
 docker compose up -d --no-deps --force-recreate worker >/dev/null
 
-if ! docker compose exec -T worker docker container inspect --format '{{.State.Status}}' -- "$docker_target" >/dev/null 2>&1; then
-  fail "worker lost access to the configured Docker target after final configuration."
-fi
+attempt=0
+consecutive_running=0
+while [ "$attempt" -lt 25 ]; do
+  worker_state=$(docker inspect --format '{{.State.Status}}' "$(docker compose ps -q worker)" 2>/dev/null || true)
+  if [ "$worker_state" = "running" ]; then
+    consecutive_running=$((consecutive_running + 1))
+    [ "$consecutive_running" -ge 5 ] && break
+  else
+    consecutive_running=0
+  fi
+  sleep 1
+  attempt=$((attempt + 1))
+done
+[ "$worker_state" = "running" ] && [ "$consecutive_running" -ge 5 ] \
+  || { docker compose logs --tail=100 worker >&2 || true; fail "worker runtime-helper preflight failed closed."; }
 
 note ""
 note "NoPager production operations is configured."
 note "Sign in: http://localhost:${web_port}/setup"
 note "Login username: $admin_username"
 note "Mode: $safety_mode"
-note "Protected Docker target: $docker_target"
+note "Protected Docker target: $docker_target (immutable enrollment $target_id)"
+note "Privilege boundary: worker has no Docker CLI/socket; restart authority is isolated in nopager-runtime-helper.service."
 note "Health signal: $health_url"
 note ""
 if [ "$safety_mode" = "safe" ]; then

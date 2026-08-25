@@ -269,15 +269,7 @@ fn valid_request(request: &ProtectOperationsAppRequest) -> bool {
 
 fn valid_docker_target(value: &str) -> bool {
     let value = value.trim();
-    !value.is_empty()
-        && value.len() <= 128
-        && value
-            .chars()
-            .next()
-            .is_some_and(|character| character.is_ascii_alphanumeric())
-        && value.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
-        })
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 #[cfg(test)]
@@ -299,8 +291,8 @@ mod tests {
 
     #[test]
     fn accepts_only_bounded_docker_target_identifiers() {
-        assert!(valid_request(&request("checkout-api_1")));
-        for invalid in ["", "--host=x", "web;rm", "../web", "/web", "web container"] {
+        assert!(valid_request(&request(&"a".repeat(64))));
+        for invalid in ["", "checkout-api_1", "--host=x", "web;rm", "../web", "/web"] {
             assert!(!valid_request(&request(invalid)), "{invalid}");
         }
     }

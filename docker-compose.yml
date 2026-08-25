@@ -109,6 +109,9 @@ services:
       NOPAGER_ALLOW_PREVIEW_SECRETS: ${NOPAGER_ALLOW_PREVIEW_SECRETS:-false}
       NOPAGER_DOCKER_TARGET: ${NOPAGER_DOCKER_TARGET:-}
       NOPAGER_ALLOW_CONTAINER_RESTART: ${NOPAGER_ALLOW_CONTAINER_RESTART:-false}
+      NOPAGER_RUNTIME_HELPER_SOCKET: /run/nopager-runtime/runtime-helper.sock
+      NOPAGER_RUNTIME_HELPER_TOKEN: ${NOPAGER_RUNTIME_HELPER_TOKEN:-}
+      NOPAGER_RUNTIME_HELPER_TIMEOUT_SECONDS: ${NOPAGER_RUNTIME_HELPER_TIMEOUT_SECONDS:-30}
       NOPAGER_WORK_ROOT: /workspaces
       NOPAGER_SANDBOX_VOLUME: nopager-workspaces
       SANDBOX_UID_GID: ${SANDBOX_UID_GID:-10001:10001}
@@ -117,9 +120,9 @@ services:
       SANDBOX_TIMEOUT_SECONDS: ${SANDBOX_TIMEOUT_SECONDS:-900}
       RUST_LOG: ${RUST_LOG:-info}
     group_add:
-      - ${DOCKER_GID:-999}
+      - ${NOPAGER_RUNTIME_GID:-10001}
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      - ${NOPAGER_RUNTIME_SOCKET_DIR:-./.runtime/ipc}:/run/nopager-runtime:ro
       - nopager-workspaces:/workspaces
     depends_on:
       postgres:

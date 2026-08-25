@@ -1,5 +1,5 @@
 [package]
-name = "nopager-connectors"
+name = "nopager-runtime-helper"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,17 +7,17 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-base64.workspace = true
-flate2.workspace = true
-jsonwebtoken.workspace = true
-reqwest.workspace = true
-nopager-runtime-protocol = { path = "../nopager-runtime-protocol" }
+anyhow.workspace = true
+async-trait.workspace = true
+clap.workspace = true
+nopager-runtime-protocol = { path = "../../crates/nopager-runtime-protocol" }
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+subtle.workspace = true
 thiserror.workspace = true
-tar.workspace = true
-time.workspace = true
 tokio.workspace = true
-url.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 uuid.workspace = true

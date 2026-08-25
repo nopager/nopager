@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use nopager_connectors::docker_ops::{DockerOperationsClient, DockerOperationsError};
+use nopager_connectors::docker_ops::{RuntimeHelperClient, RuntimeHelperError};
 use nopager_core::IncidentState;
 use nopager_crypto::SecretCipher;
 use nopager_db::{Database, IncidentTransition};
@@ -13,6 +13,7 @@ use nopager_providers::{
     ModelProvider, OpenAiProvider, OperationsActionKind, OperationsDecision, OperationsInput,
     OperationsVerificationKind,
 };
+use nopager_runtime_protocol::{MutationDisposition, RuntimeErrorCode};
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::{Value, json};
 use sqlx::Row;
@@ -89,10 +90,10 @@ pub async fn process_plan(database: &Database, payload: &Value) -> anyhow::Resul
 
     let restart_enabled = env_true("NOPAGER_ALLOW_CONTAINER_RESTART");
     let target = configured_container_target();
-    let docker = DockerOperationsClient::from_environment();
-    let container_state = match target.as_deref() {
-        Some(target) => docker.inspect_container(target).await.ok(),
-        None => None,
+    let helper = RuntimeHelperClient::from_environment().ok();
+    let container_state = match (target.as_deref(), helper.as_ref()) {
+        (Some(target), Some(helper)) => helper.inspect_container(target).await.ok(),
+        _ => None,
     };
 
     let mut available_actions = vec![
@@ -126,7 +127,7 @@ pub async fn process_plan(database: &Database, payload: &Value) -> anyhow::Resul
         available_actions.push(AvailableOperationsAction::new(
             OperationsActionKind::RestartContainer,
             Some(target.to_owned()),
-            "Restart exactly this configured Docker container through NoPager's trusted connector",
+            "Restart exactly this immutable enrolled container through the deterministic host runtime helper",
         ));
     }
 
@@ -145,20 +146,20 @@ pub async fn process_plan(database: &Database, payload: &Value) -> anyhow::Resul
 
     let infrastructure = match (&target, &container_state) {
         (Some(target), Some(state)) => json!({
-            "docker": {
+                "runtimeHelper": {
                 "targetId": target,
                 "state": state,
                 "restartCapabilityEnabled": restart_enabled
             }
         }),
         (Some(target), None) => json!({
-            "docker": {
+                "runtimeHelper": {
                 "targetId": target,
                 "status": "unavailable",
                 "restartCapabilityEnabled": restart_enabled
             }
         }),
-        (None, _) => json!({ "docker": { "configured": false } }),
+        (None, _) => json!({ "runtimeHelper": { "configured": false } }),
     };
 
     let input = OperationsInput {
@@ -171,8 +172,32 @@ pub async fn process_plan(database: &Database, payload: &Value) -> anyhow::Resul
         verification_signals,
     };
     let provider = provider_for(database, work.project_id).await?;
-    let decision = provider.plan_operations(&input).await?;
+    let input_bytes = serde_json::to_vec(&input)?.len();
+    let approximate_input_tokens = input_bytes.div_ceil(4);
+    let decision = match provider.plan_operations(&input).await {
+        Ok(decision) => decision,
+        Err(error) => {
+            database
+                .record_audit_event(
+                    work.project_id,
+                    Some(incident_id),
+                    &format!("provider:{}", provider.id()),
+                    "model.operations_plan",
+                    &incident_id.to_string(),
+                    "failed",
+                    &json!({
+                        "requestCount": 1,
+                        "inputBytes": input_bytes,
+                        "approximateInputTokens": approximate_input_tokens,
+                        "outcome": "provider_error"
+                    }),
+                )
+                .await?;
+            return Err(error.into());
+        }
+    };
     let decision_json = serde_json::to_value(&decision)?;
+    let output_bytes = serde_json::to_vec(&decision)?.len();
 
     database
         .record_audit_event(
@@ -182,7 +207,14 @@ pub async fn process_plan(database: &Database, payload: &Value) -> anyhow::Resul
             "model.operations_plan",
             &incident_id.to_string(),
             "success",
-            &decision_json,
+            &json!({
+                "requestCount": 1,
+                "inputBytes": input_bytes,
+                "approximateInputTokens": approximate_input_tokens,
+                "outputBytes": output_bytes,
+                "approximateOutputTokens": output_bytes.div_ceil(4),
+                "decision": decision_json
+            }),
         )
         .await?;
     database
@@ -454,34 +486,18 @@ pub async fn process_execute(database: &Database, payload: &Value) -> anyhow::Re
         return Ok(());
     }
 
-    let docker = DockerOperationsClient::from_environment();
-    let result = match docker.restart_container(&action.target_id).await {
+    let helper = match RuntimeHelperClient::from_environment() {
+        Ok(helper) => helper,
+        Err(error) => {
+            fail_closed_helper_execution(database, &work, incident_id, action_id, &action, &error)
+                .await?;
+            return Ok(());
+        }
+    };
+    let result = match helper.restart_container(action_id, &action.target_id).await {
         Ok(result) => result,
         Err(error) => {
-            let error_class = docker_error_class(&error);
-            mark_operation_status(
-                database,
-                action_id,
-                "AMBIGUOUS",
-                Some(&json!({ "errorClass": error_class })),
-            )
-            .await?;
-            database
-                .record_audit_event(
-                    work.project_id,
-                    Some(incident_id),
-                    "operations-worker",
-                    "operations.docker.restart",
-                    &action.target_id,
-                    "unknown",
-                    &json!({ "errorClass": error_class }),
-                )
-                .await?;
-            database
-                .escalate_incident(
-                    incident_id,
-                    "Docker restart did not produce a safely provable outcome; NoPager refused to retry the mutation",
-                )
+            fail_closed_helper_execution(database, &work, incident_id, action_id, &action, &error)
                 .await?;
             return Ok(());
         }
@@ -494,17 +510,65 @@ pub async fn process_execute(database: &Database, payload: &Value) -> anyhow::Re
             work.project_id,
             Some(incident_id),
             "operations-worker",
-            "operations.docker.restart",
+            "operations.runtime_helper.restart_container",
             &action.target_id,
             "success",
             &json!({
                 "beforeStatus": result.before.status,
                 "afterStatus": result.after.status,
-                "operationActionId": action_id
+                "operationActionId": action_id,
+                "duplicateResponse": result.duplicate
             }),
         )
         .await?;
     begin_verification(database, &work, incident_id, action_id).await?;
+    Ok(())
+}
+
+async fn fail_closed_helper_execution(
+    database: &Database,
+    work: &nopager_db::IncidentWork,
+    incident_id: Uuid,
+    action_id: Uuid,
+    action: &PersistedOperationAction,
+    error: &RuntimeHelperError,
+) -> anyhow::Result<()> {
+    let error_class = helper_error_class(error);
+    let disposition = error.mutation_disposition();
+    let (status, outcome, reason) = match disposition {
+        MutationDisposition::NotStarted => (
+            "FAILED_CLOSED",
+            "not_started",
+            "runtime helper rejected or could not accept the restart; no mutation was started and NoPager will not retry automatically",
+        ),
+        MutationDisposition::Ambiguous | MutationDisposition::Completed => (
+            "AMBIGUOUS",
+            "unknown",
+            "runtime helper restart outcome is ambiguous; NoPager will never replay this mutation request",
+        ),
+    };
+    let evidence = json!({
+        "errorClass": error_class,
+        "mutationDisposition": match disposition {
+            MutationDisposition::NotStarted => "not_started",
+            MutationDisposition::Completed => "completed",
+            MutationDisposition::Ambiguous => "ambiguous",
+        },
+        "operationActionId": action_id
+    });
+    mark_operation_status(database, action_id, status, Some(&evidence)).await?;
+    database
+        .record_audit_event(
+            work.project_id,
+            Some(incident_id),
+            "operations-worker",
+            "operations.runtime_helper.restart_container",
+            &action.target_id,
+            outcome,
+            &evidence,
+        )
+        .await?;
+    database.escalate_incident(incident_id, reason).await?;
     Ok(())
 }
 
@@ -566,15 +630,17 @@ pub async fn process_verify(database: &Database, payload: &Value) -> anyhow::Res
     let url = url::Url::parse(&work.health_check_url)?;
     let health = check_http(&url, 200, Duration::from_secs(10)).await;
     let health_ok = health.as_ref().is_ok_and(|observation| observation.success);
-    let container = DockerOperationsClient::from_environment()
-        .inspect_container(&action.target_id)
-        .await;
+    let container = match RuntimeHelperClient::from_environment() {
+        Ok(helper) => helper.inspect_container(&action.target_id).await,
+        Err(error) => Err(error),
+    };
     let container_ok = container.as_ref().is_ok_and(|state| state.running());
 
     if !health_ok || !container_ok {
         let verification = json!({
             "externalHealth": health_ok,
             "containerRunning": container_ok,
+            "runtimeHelperErrorClass": container.as_ref().err().map(helper_error_class),
             "check": check + 1,
             "requiredConsecutiveSuccesses": required
         });
@@ -591,10 +657,7 @@ pub async fn process_verify(database: &Database, payload: &Value) -> anyhow::Res
             )
             .await?;
         database
-            .escalate_incident(
-                incident_id,
-                "container restart completed but independent production health verification failed; NoPager will not loop or issue another restart",
-            )
+            .escalate_incident(incident_id, verification_failure_reason(container_ok))
             .await?;
         return Ok(());
     }
@@ -727,7 +790,7 @@ async fn mark_operation_status(
     execution: Option<&Value>,
 ) -> anyhow::Result<()> {
     sqlx::query(
-        "UPDATE operations_actions SET status = $1, execution_json = COALESCE($2, execution_json), completed_at = CASE WHEN $1 IN ('BLOCKED', 'APPROVAL_REQUIRED', 'AMBIGUOUS', 'VERIFIED', 'VERIFICATION_FAILED') THEN now() ELSE completed_at END WHERE id = $3",
+        "UPDATE operations_actions SET status = $1, execution_json = COALESCE($2, execution_json), completed_at = CASE WHEN $1 IN ('BLOCKED', 'FAILED_CLOSED', 'APPROVAL_REQUIRED', 'AMBIGUOUS', 'VERIFIED', 'VERIFICATION_FAILED') THEN now() ELSE completed_at END WHERE id = $3",
     )
     .bind(status)
     .bind(execution)
@@ -760,7 +823,7 @@ async fn restart_cooldown_clear(
     target: &str,
 ) -> anyhow::Result<bool> {
     Ok(sqlx::query_scalar::<_, bool>(
-        "SELECT NOT EXISTS(SELECT 1 FROM audit_events WHERE project_id = $1 AND action = 'operations.docker.restart' AND target = $2 AND outcome = 'success' AND created_at > now() - ($3 * interval '1 minute'))",
+        "SELECT NOT EXISTS(SELECT 1 FROM audit_events WHERE project_id = $1 AND action = 'operations.runtime_helper.restart_container' AND target = $2 AND outcome = 'success' AND created_at > now() - ($3 * interval '1 minute'))",
     )
     .bind(project_id)
     .bind(target)
@@ -904,15 +967,43 @@ fn env_true(name: &str) -> bool {
     })
 }
 
-fn docker_error_class(error: &DockerOperationsError) -> &'static str {
+const fn verification_failure_reason(container_running: bool) -> &'static str {
+    if container_running {
+        "container is running but external HTTP recovery failed; NoPager will not loop or issue another restart"
+    } else {
+        "runtime-helper container-state verification failed after restart; NoPager will not loop or issue another restart"
+    }
+}
+
+fn helper_error_class(error: &RuntimeHelperError) -> &'static str {
     match error {
-        DockerOperationsError::InvalidTarget => "invalid_target",
-        DockerOperationsError::Timeout => "timeout",
-        DockerOperationsError::Io(_) => "io",
-        DockerOperationsError::CommandFailed { .. } => "command_failed",
-        DockerOperationsError::InvalidInspectOutput => "invalid_inspect_output",
-        DockerOperationsError::ControlPlaneTarget => "control_plane_target",
-        DockerOperationsError::RestartDidNotStart => "restart_did_not_start",
+        RuntimeHelperError::InvalidTarget => "invalid_target",
+        RuntimeHelperError::InvalidSocketPath => "invalid_socket_path",
+        RuntimeHelperError::CredentialMissing => "credential_missing",
+        RuntimeHelperError::InvalidTimeout => "invalid_timeout",
+        RuntimeHelperError::HelperUnavailable => "helper_unavailable",
+        RuntimeHelperError::ResponseTimeout { .. } => "helper_timeout",
+        RuntimeHelperError::ResponseLost { .. } => "helper_response_lost",
+        RuntimeHelperError::Rejected { code, .. } => match code {
+            RuntimeErrorCode::AuthenticationFailed => "authentication_failed",
+            RuntimeErrorCode::PeerNotAllowed => "peer_not_allowed",
+            RuntimeErrorCode::ProtocolVersionUnsupported => "protocol_version_unsupported",
+            RuntimeErrorCode::InvalidRequest => "invalid_request",
+            RuntimeErrorCode::TargetNotEnrolled => "target_not_enrolled",
+            RuntimeErrorCode::TargetDisappeared => "target_disappeared",
+            RuntimeErrorCode::TargetReplaced => "target_replaced",
+            RuntimeErrorCode::ControlPlaneTarget => "control_plane_target",
+            RuntimeErrorCode::SameControlPlaneProject => "same_control_plane_project",
+            RuntimeErrorCode::DockerDaemonUnavailable => "docker_daemon_unavailable",
+            RuntimeErrorCode::RestartAmbiguous => "restart_ambiguous",
+            RuntimeErrorCode::RestartDidNotStart => "restart_did_not_start",
+            RuntimeErrorCode::DuplicateAmbiguous => "duplicate_ambiguous",
+            RuntimeErrorCode::InternalError => "helper_internal_error",
+        },
+        RuntimeHelperError::InvalidResponse { .. } => "invalid_response",
+        RuntimeHelperError::UnexpectedResponse { .. } => "unexpected_response",
+        RuntimeHelperError::RequestTooLarge => "request_too_large",
+        RuntimeHelperError::UnsupportedPlatform => "unsupported_platform",
     }
 }
 
@@ -946,12 +1037,12 @@ mod tests {
     }
 
     #[test]
-    fn docker_error_classes_do_not_expose_command_output() {
-        let error = DockerOperationsError::CommandFailed {
-            code: Some(1),
-            message: "secret-looking stderr".into(),
+    fn helper_error_classes_expose_only_protocol_codes() {
+        let error = RuntimeHelperError::Rejected {
+            code: RuntimeErrorCode::TargetReplaced,
+            mutation: MutationDisposition::NotStarted,
         };
-        assert_eq!(docker_error_class(&error), "command_failed");
+        assert_eq!(helper_error_class(&error), "target_replaced");
     }
 
     #[test]
@@ -959,6 +1050,13 @@ mod tests {
         for model_value in [0_u8, 1, 2, 10] {
             assert!(u64::from(model_value.clamp(2, 3)) >= 2);
         }
+    }
+
+    #[test]
+    fn running_container_with_unhealthy_http_is_never_resolved() {
+        assert!(verification_failure_reason(true).contains("external HTTP recovery failed"));
+        assert!(verification_failure_reason(true).contains("will not loop"));
+        assert!(verification_failure_reason(false).contains("container-state verification failed"));
     }
 
     #[test]
