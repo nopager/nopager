@@ -1,5 +1,9 @@
 # Design Partner production-operations release
 
+## Validation status
+
+The repository test suite and Linux/Docker privilege-boundary smoke test pass for this source milestone. A complete acceptance record from a tester-provided real VPS, real BYOK provider, and public HTTPS recovery target does **not** exist yet. This build is therefore not externally validated and must not be represented as having passed Design Partner real-host acceptance. NoPager does not provide or require a vendor-operated VPS for this self-hosted OSS Alpha; each tester supplies the disposable host and BYOK credentials, then follows the [Design Partner Acceptance Test](DESIGN_PARTNER_ACCEPTANCE.md).
+
 ## Tested version
 
 The release identifier is `0.2.0-design-partner.1`, stored in [`DESIGN_PARTNER_VERSION`](../DESIGN_PARTNER_VERSION). A design partner must use an annotated source commit/tag containing that exact file and record `git rev-parse HEAD` in the acceptance record. Do not describe an uncommitted working tree as a tested release. The acceptance script prints and records both values; the exact commit becomes the release identifier alongside the version.
