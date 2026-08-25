@@ -1329,7 +1329,7 @@ dependencies = [
 
 [[package]]
 name = "nopager-cli"
-version = "0.1.0-alpha.1"
+version = "0.2.0-design-partner.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -1343,7 +1343,7 @@ dependencies = [
 
 [[package]]
 name = "nopager-config"
-version = "0.1.0-alpha.1"
+version = "0.2.0-design-partner.1"
 dependencies = [
  "serde",
  "thiserror",
@@ -1351,11 +1351,12 @@ dependencies = [
 
 [[package]]
 name = "nopager-connectors"
-version = "0.1.0-alpha.1"
+version = "0.2.0-design-partner.1"
 dependencies = [
  "base64",
  "flate2",
  "jsonwebtoken",
+ "nopager-runtime-protocol",
  "reqwest",
  "secrecy",
  "serde",
@@ -1365,11 +1366,12 @@ dependencies = [
  "time",
  "tokio",
  "url",
+ "uuid",
 ]
 
 [[package]]
 name = "nopager-core"
-version = "0.1.0-alpha.1"
+version = "0.2.0-design-partner.1"
 dependencies = [
  "serde",
  "thiserror",
@@ -1378,7 +1380,7 @@ dependencies = [
 
 [[package]]
 name = "nopager-crypto"
-version = "0.1.0-alpha.1"
+version = "0.2.0-design-partner.1"
 dependencies = [
  "base64",
  "chacha20poly1305",
@@ -1389,7 +1391,7 @@ dependencies = [
 
 [[package]]
 name = "nopager-db"
-version = "0.1.0-alpha.1"
+version = "0.2.0-design-partner.1"
 dependencies = [
  "nopager-core",
  "serde",
@@ -1404,7 +1406,7 @@ dependencies = [
 
 [[package]]
 name = "nopager-monitor"
-version = "0.1.0-alpha.1"
+version = "0.2.0-design-partner.1"
 dependencies = [
  "ipnet",
  "reqwest",
@@ -1415,14 +1417,14 @@ dependencies = [
 
 [[package]]
 name = "nopager-policy"
-version = "0.1.0-alpha.1"
+version = "0.2.0-design-partner.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "nopager-providers"
-version = "0.1.0-alpha.1"
+version = "0.2.0-design-partner.1"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -1434,8 +1436,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "nopager-runtime-helper"
+version = "0.2.0-design-partner.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap",
+ "nopager-runtime-protocol",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "nopager-runtime-protocol"
+version = "0.2.0-design-partner.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "nopager-sandbox"
-version = "0.1.0-alpha.1"
+version = "0.2.0-design-partner.1"
 dependencies = [
  "diffy",
  "serde",
@@ -1445,7 +1476,7 @@ dependencies = [
 
 [[package]]
 name = "nopager-server"
-version = "0.1.0-alpha.1"
+version = "0.2.0-design-partner.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1463,6 +1494,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sqlx",
  "subtle",
  "time",
  "tokio",
@@ -1475,7 +1507,7 @@ dependencies = [
 
 [[package]]
 name = "nopager-webhooks"
-version = "0.1.0-alpha.1"
+version = "0.2.0-design-partner.1"
 dependencies = [
  "hex",
  "hmac",
@@ -1486,7 +1518,7 @@ dependencies = [
 
 [[package]]
 name = "nopager-worker"
-version = "0.1.0-alpha.1"
+version = "0.2.0-design-partner.1"
 dependencies = [
  "anyhow",
  "hex",
@@ -1497,10 +1529,12 @@ dependencies = [
  "nopager-monitor",
  "nopager-policy",
  "nopager-providers",
+ "nopager-runtime-protocol",
  "nopager-sandbox",
  "secrecy",
  "serde_json",
  "sha2",
+ "sqlx",
  "tokio",
  "tracing",
  "tracing-subscriber",

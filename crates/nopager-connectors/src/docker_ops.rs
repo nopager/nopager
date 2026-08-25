@@ -1,333 +1,379 @@
-use std::{process::Stdio, time::Duration};
+use std::{path::PathBuf, time::Duration};
 
-use serde::Serialize;
+pub use nopager_runtime_protocol::ContainerState as DockerContainerState;
+use nopager_runtime_protocol::{
+    MutationDisposition, RuntimeErrorCode, RuntimeRequest, RuntimeResponse, RuntimeResult,
+    RuntimeSuccess,
+};
+use secrecy::{ExposeSecret, SecretString};
 use thiserror::Error;
-use tokio::{process::Command, time::timeout};
+use uuid::Uuid;
 
-const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_COMMAND_OUTPUT_BYTES: usize = 16 * 1024;
-const INSPECT_FORMAT: &str = r#"{{.Id}}\t{{.Name}}\t{{.State.Status}}\t{{index .Config.Labels "com.docker.compose.project"}}\t{{index .Config.Labels "com.docker.compose.service"}}\t{{index .Config.Labels "com.nopager.control-plane"}}"#;
+const DEFAULT_HELPER_SOCKET: &str = "/run/nopager-runtime/runtime-helper.sock";
+const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DockerContainerState {
-    pub id: String,
-    pub name: String,
-    pub status: String,
-    pub compose_project: Option<String>,
-    pub compose_service: Option<String>,
-    pub nopager_control_plane: bool,
-}
-
-impl DockerContainerState {
-    #[must_use]
-    pub fn running(&self) -> bool {
-        self.status == "running"
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DockerRestartResult {
     pub before: DockerContainerState,
     pub after: DockerContainerState,
+    pub duplicate: bool,
 }
 
-/// Executes a deliberately tiny Docker operations surface.
+/// Client for the narrow host runtime-helper protocol.
 ///
-/// The model never supplies a command. Trusted NoPager code passes a validated,
-/// configured container identity to these fixed Docker CLI operations.
-#[derive(Debug, Clone)]
-pub struct DockerOperationsClient {
-    docker_program: String,
-    command_timeout: Duration,
-    self_container_hint: Option<String>,
+/// This type never invokes Docker, a shell, or an arbitrary command. The ordinary
+/// worker can request only typed inspect/restart operations for the exact target
+/// independently enrolled in the privileged host helper.
+#[derive(Clone)]
+pub struct RuntimeHelperClient {
+    socket_path: PathBuf,
+    credential: SecretString,
+    timeout: Duration,
 }
 
-impl Default for DockerOperationsClient {
-    fn default() -> Self {
-        Self::from_environment()
+impl std::fmt::Debug for RuntimeHelperClient {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RuntimeHelperClient")
+            .field("socket_path", &self.socket_path)
+            .field("credential", &"[REDACTED]")
+            .field("timeout", &self.timeout)
+            .finish()
     }
 }
 
-impl DockerOperationsClient {
-    #[must_use]
-    pub fn from_environment() -> Self {
-        let explicit = std::env::var("NOPAGER_DOCKER_SELF_CONTAINER")
+impl RuntimeHelperClient {
+    pub fn from_environment() -> Result<Self, RuntimeHelperError> {
+        let socket_path = std::env::var("NOPAGER_RUNTIME_HELPER_SOCKET")
+            .unwrap_or_else(|_| DEFAULT_HELPER_SOCKET.into());
+        let credential = std::env::var("NOPAGER_RUNTIME_HELPER_TOKEN")
             .ok()
-            .filter(|value| valid_container_target(value));
-        let hostname = std::env::var("HOSTNAME")
+            .filter(|value| value.len() >= 32)
+            .map(SecretString::from)
+            .ok_or(RuntimeHelperError::CredentialMissing)?;
+        let timeout_seconds = std::env::var("NOPAGER_RUNTIME_HELPER_TIMEOUT_SECONDS")
             .ok()
-            .filter(|value| looks_like_container_id(value));
-        Self {
-            docker_program: "docker".into(),
-            command_timeout: DEFAULT_COMMAND_TIMEOUT,
-            self_container_hint: explicit.or(hostname),
-        }
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_TIMEOUT_SECONDS)
+            .clamp(1, 60);
+        Self::new(
+            PathBuf::from(socket_path),
+            credential,
+            Duration::from_secs(timeout_seconds),
+        )
     }
 
-    #[cfg(test)]
-    fn for_test(self_container_hint: Option<&str>) -> Self {
-        Self {
-            docker_program: "docker".into(),
-            command_timeout: DEFAULT_COMMAND_TIMEOUT,
-            self_container_hint: self_container_hint.map(ToOwned::to_owned),
+    pub fn new(
+        socket_path: PathBuf,
+        credential: SecretString,
+        timeout: Duration,
+    ) -> Result<Self, RuntimeHelperError> {
+        if !socket_path.is_absolute() {
+            return Err(RuntimeHelperError::InvalidSocketPath);
         }
+        if credential.expose_secret().len() < 32 {
+            return Err(RuntimeHelperError::CredentialMissing);
+        }
+        if timeout.is_zero() || timeout > Duration::from_secs(60) {
+            return Err(RuntimeHelperError::InvalidTimeout);
+        }
+        Ok(Self {
+            socket_path,
+            credential,
+            timeout,
+        })
     }
 
-    /// Read a bounded, non-secret container status snapshot.
     pub async fn inspect_container(
         &self,
-        target: &str,
-    ) -> Result<DockerContainerState, DockerOperationsError> {
-        validate_container_target(target)?;
-        let output = self
-            .run(&[
-                "container",
-                "inspect",
-                "--format",
-                INSPECT_FORMAT,
-                "--",
-                target,
-            ])
-            .await?;
-        parse_inspect_output(&output.stdout)
+        target_id: &str,
+    ) -> Result<DockerContainerState, RuntimeHelperError> {
+        validate_target_id(target_id)?;
+        let request_id = Uuid::now_v7();
+        let request = RuntimeRequest::inspect(
+            request_id,
+            self.credential.expose_secret().to_owned(),
+            target_id.to_owned(),
+        );
+        let response = self.exchange(request, false).await?;
+        match response.result {
+            RuntimeResult::Success(RuntimeSuccess::Inspect { state }) => Ok(state),
+            RuntimeResult::Rejected { code, mutation, .. } => {
+                Err(RuntimeHelperError::Rejected { code, mutation })
+            }
+            RuntimeResult::Success(_) => Err(RuntimeHelperError::UnexpectedResponse {
+                mutation: MutationDisposition::NotStarted,
+            }),
+        }
     }
 
-    /// Restart exactly one configured container.
-    ///
-    /// This method checks the target before mutation and refuses to restart a
-    /// NoPager control-plane container or any container in the same Compose
-    /// project as the current NoPager worker. Independent application health
-    /// verification must still happen after this connector returns success.
     pub async fn restart_container(
         &self,
-        target: &str,
-    ) -> Result<DockerRestartResult, DockerOperationsError> {
-        validate_container_target(target)?;
-        let before = self.inspect_container(target).await?;
-        let self_state = self.inspect_self_if_available().await;
-        ensure_safe_mutation_target(&before, self_state.as_ref())?;
-
-        self.run(&["container", "restart", "--time", "10", "--", target])
-            .await?;
-
-        let after = self.inspect_container(target).await?;
-        if !after.running() {
-            return Err(DockerOperationsError::RestartDidNotStart);
+        request_id: Uuid,
+        target_id: &str,
+    ) -> Result<DockerRestartResult, RuntimeHelperError> {
+        validate_target_id(target_id)?;
+        let request = RuntimeRequest::restart(
+            request_id,
+            self.credential.expose_secret().to_owned(),
+            target_id.to_owned(),
+        );
+        let response = self.exchange(request, true).await?;
+        let duplicate = response.duplicate;
+        match response.result {
+            RuntimeResult::Success(RuntimeSuccess::RestartContainer { before, after }) => {
+                Ok(DockerRestartResult {
+                    before,
+                    after,
+                    duplicate,
+                })
+            }
+            RuntimeResult::Rejected { code, mutation, .. } => {
+                Err(RuntimeHelperError::Rejected { code, mutation })
+            }
+            RuntimeResult::Success(_) => Err(RuntimeHelperError::UnexpectedResponse {
+                mutation: MutationDisposition::Ambiguous,
+            }),
         }
-        Ok(DockerRestartResult { before, after })
     }
 
-    async fn inspect_self_if_available(&self) -> Option<DockerContainerState> {
-        let target = self.self_container_hint.as_deref()?;
-        self.inspect_container(target).await.ok()
-    }
+    #[cfg(unix)]
+    async fn exchange(
+        &self,
+        request: RuntimeRequest,
+        mutating: bool,
+    ) -> Result<RuntimeResponse, RuntimeHelperError> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::UnixStream;
+        use tokio::time::timeout;
 
-    async fn run(&self, args: &[&str]) -> Result<CommandOutput, DockerOperationsError> {
-        let mut command = Command::new(&self.docker_program);
-        command
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+        let request_id = request.request_id;
+        let mut encoded =
+            serde_json::to_vec(&request).map_err(|_| RuntimeHelperError::InvalidResponse {
+                mutation: MutationDisposition::NotStarted,
+            })?;
+        if encoded.len() + 1 > nopager_runtime_protocol::MAX_MESSAGE_BYTES {
+            return Err(RuntimeHelperError::RequestTooLarge);
+        }
+        encoded.push(b'\n');
 
-        let output = timeout(self.command_timeout, command.output())
+        let mut stream = timeout(self.timeout, UnixStream::connect(&self.socket_path))
             .await
-            .map_err(|_| DockerOperationsError::Timeout)??;
-        let stdout = bounded_utf8(&output.stdout);
-        let stderr = bounded_utf8(&output.stderr);
-        if !output.status.success() {
-            return Err(DockerOperationsError::CommandFailed {
-                code: output.status.code(),
-                message: stderr,
+            .map_err(|_| RuntimeHelperError::HelperUnavailable)?
+            .map_err(|_| RuntimeHelperError::HelperUnavailable)?;
+
+        let sent_disposition = if mutating {
+            MutationDisposition::Ambiguous
+        } else {
+            MutationDisposition::NotStarted
+        };
+        timeout(self.timeout, stream.write_all(&encoded))
+            .await
+            .map_err(|_| RuntimeHelperError::ResponseLost {
+                mutation: sent_disposition,
+            })?
+            .map_err(|_| RuntimeHelperError::ResponseLost {
+                mutation: sent_disposition,
+            })?;
+        stream
+            .shutdown()
+            .await
+            .map_err(|_| RuntimeHelperError::ResponseLost {
+                mutation: sent_disposition,
+            })?;
+
+        let mut response_bytes = Vec::new();
+        let mut limited = stream.take((nopager_runtime_protocol::MAX_MESSAGE_BYTES + 1) as u64);
+        timeout(self.timeout, limited.read_to_end(&mut response_bytes))
+            .await
+            .map_err(|_| RuntimeHelperError::ResponseTimeout {
+                mutation: if mutating {
+                    MutationDisposition::Ambiguous
+                } else {
+                    MutationDisposition::NotStarted
+                },
+            })?
+            .map_err(|_| RuntimeHelperError::ResponseLost {
+                mutation: if mutating {
+                    MutationDisposition::Ambiguous
+                } else {
+                    MutationDisposition::NotStarted
+                },
+            })?;
+        if response_bytes.len() > nopager_runtime_protocol::MAX_MESSAGE_BYTES {
+            return Err(RuntimeHelperError::InvalidResponse {
+                mutation: sent_disposition,
             });
         }
-        Ok(CommandOutput { stdout })
+        let response: RuntimeResponse = serde_json::from_slice(&response_bytes).map_err(|_| {
+            RuntimeHelperError::InvalidResponse {
+                mutation: sent_disposition,
+            }
+        })?;
+        if response.protocol_version != nopager_runtime_protocol::PROTOCOL_VERSION
+            || response.request_id != request_id
+        {
+            return Err(RuntimeHelperError::InvalidResponse {
+                mutation: sent_disposition,
+            });
+        }
+        Ok(response)
+    }
+
+    #[cfg(not(unix))]
+    async fn exchange(
+        &self,
+        _request: RuntimeRequest,
+        _mutating: bool,
+    ) -> Result<RuntimeResponse, RuntimeHelperError> {
+        Err(RuntimeHelperError::UnsupportedPlatform)
     }
 }
 
-#[derive(Debug)]
-struct CommandOutput {
-    stdout: String,
-}
-
-fn ensure_safe_mutation_target(
-    target: &DockerContainerState,
-    self_state: Option<&DockerContainerState>,
-) -> Result<(), DockerOperationsError> {
-    if target.nopager_control_plane {
-        return Err(DockerOperationsError::ControlPlaneTarget);
-    }
-
-    let Some(self_state) = self_state else {
-        return Ok(());
-    };
-    if target.id == self_state.id {
-        return Err(DockerOperationsError::ControlPlaneTarget);
-    }
-    if let (Some(target_project), Some(self_project)) = (
-        target.compose_project.as_deref(),
-        self_state.compose_project.as_deref(),
-    ) && !target_project.is_empty()
-        && target_project == self_project
-    {
-        return Err(DockerOperationsError::ControlPlaneTarget);
-    }
-    Ok(())
-}
-
-fn parse_inspect_output(value: &str) -> Result<DockerContainerState, DockerOperationsError> {
-    let line = value.lines().next().unwrap_or_default().trim();
-    let parts = line.split('\t').collect::<Vec<_>>();
-    if parts.len() != 6 {
-        return Err(DockerOperationsError::InvalidInspectOutput);
-    }
-    let id = parts[0].trim();
-    let name = parts[1].trim().trim_start_matches('/');
-    let status = parts[2].trim();
-    if id.is_empty() || name.is_empty() || status.is_empty() {
-        return Err(DockerOperationsError::InvalidInspectOutput);
-    }
-
-    Ok(DockerContainerState {
-        id: id.to_owned(),
-        name: name.to_owned(),
-        status: status.to_owned(),
-        compose_project: optional_template_value(parts[3]),
-        compose_service: optional_template_value(parts[4]),
-        nopager_control_plane: parts[5].trim().eq_ignore_ascii_case("true"),
-    })
-}
-
-fn optional_template_value(value: &str) -> Option<String> {
-    let value = value.trim();
-    (!value.is_empty() && value != "<no value>").then(|| value.to_owned())
-}
-
-fn validate_container_target(value: &str) -> Result<(), DockerOperationsError> {
-    if valid_container_target(value) {
+fn validate_target_id(value: &str) -> Result<(), RuntimeHelperError> {
+    if value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         Ok(())
     } else {
-        Err(DockerOperationsError::InvalidTarget)
+        Err(RuntimeHelperError::InvalidTarget)
     }
-}
-
-fn valid_container_target(value: &str) -> bool {
-    let value = value.trim();
-    !value.is_empty()
-        && value.len() <= 128
-        && value
-            .chars()
-            .next()
-            .is_some_and(|character| character.is_ascii_alphanumeric())
-        && value.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
-        })
-}
-
-fn looks_like_container_id(value: &str) -> bool {
-    (12..=64).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn bounded_utf8(value: &[u8]) -> String {
-    let end = value.len().min(MAX_COMMAND_OUTPUT_BYTES);
-    String::from_utf8_lossy(&value[..end]).trim().to_owned()
 }
 
 #[derive(Debug, Error)]
-pub enum DockerOperationsError {
-    #[error("Docker operations target is invalid")]
+pub enum RuntimeHelperError {
+    #[error("runtime helper target must be an exact 64-character Docker container ID")]
     InvalidTarget,
-    #[error("Docker CLI operation timed out")]
-    Timeout,
-    #[error("Docker CLI could not be started: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("Docker CLI operation failed with code {code:?}: {message}")]
-    CommandFailed { code: Option<i32>, message: String },
-    #[error("Docker inspect returned an invalid bounded status response")]
-    InvalidInspectOutput,
-    #[error("refusing to mutate a NoPager control-plane container")]
-    ControlPlaneTarget,
-    #[error("Docker restart returned success but the container is not running")]
-    RestartDidNotStart,
+    #[error("runtime helper socket path must be absolute")]
+    InvalidSocketPath,
+    #[error("runtime helper credential is missing or too short")]
+    CredentialMissing,
+    #[error("runtime helper timeout is outside the supported range")]
+    InvalidTimeout,
+    #[error("runtime helper is unavailable; no mutation request was accepted")]
+    HelperUnavailable,
+    #[error("runtime helper response timed out")]
+    ResponseTimeout { mutation: MutationDisposition },
+    #[error("runtime helper response was lost")]
+    ResponseLost { mutation: MutationDisposition },
+    #[error("runtime helper rejected the request: {code:?}")]
+    Rejected {
+        code: RuntimeErrorCode,
+        mutation: MutationDisposition,
+    },
+    #[error("runtime helper returned an invalid response")]
+    InvalidResponse { mutation: MutationDisposition },
+    #[error("runtime helper returned a response for a different operation")]
+    UnexpectedResponse { mutation: MutationDisposition },
+    #[error("runtime helper request exceeded the protocol size limit")]
+    RequestTooLarge,
+    #[error("runtime helper IPC is supported only on Unix")]
+    UnsupportedPlatform,
+}
+
+impl RuntimeHelperError {
+    #[must_use]
+    pub const fn mutation_disposition(&self) -> MutationDisposition {
+        match self {
+            Self::ResponseTimeout { mutation }
+            | Self::ResponseLost { mutation }
+            | Self::InvalidResponse { mutation }
+            | Self::UnexpectedResponse { mutation }
+            | Self::Rejected { mutation, .. } => *mutation,
+            Self::InvalidTarget
+            | Self::InvalidSocketPath
+            | Self::CredentialMissing
+            | Self::InvalidTimeout
+            | Self::HelperUnavailable
+            | Self::RequestTooLarge
+            | Self::UnsupportedPlatform => MutationDisposition::NotStarted,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn state(id: &str, project: Option<&str>, control_plane: bool) -> DockerContainerState {
-        DockerContainerState {
-            id: id.into(),
-            name: id.into(),
-            status: "running".into(),
-            compose_project: project.map(ToOwned::to_owned),
-            compose_service: None,
-            nopager_control_plane: control_plane,
+    #[test]
+    fn exact_ids_prevent_alias_and_option_substitution() {
+        assert!(validate_target_id(&"a".repeat(64)).is_ok());
+        for invalid in ["customer-app", "--host=attacker", "abc", "a/b"] {
+            assert!(validate_target_id(invalid).is_err(), "{invalid}");
         }
     }
 
     #[test]
-    fn target_validation_prevents_cli_option_injection() {
-        for invalid in [
-            "",
-            "--host=attacker",
-            "web;rm -rf /",
-            "web container",
-            "../web",
-            "/web",
-        ] {
-            assert_eq!(
-                validate_container_target(invalid).unwrap_err().to_string(),
-                DockerOperationsError::InvalidTarget.to_string()
-            );
-        }
-        assert!(validate_container_target("checkout-api_1").is_ok());
-        assert!(validate_container_target("5f2a06e3f45b").is_ok());
+    fn client_has_no_docker_program_or_command_surface() {
+        let client = RuntimeHelperClient::new(
+            std::env::temp_dir().join("nopager-runtime-helper-test.sock"),
+            SecretString::from("a".repeat(32)),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let debug = format!("{client:?}");
+        assert!(!debug.contains("docker_program"));
+        assert!(!debug.contains(&"a".repeat(32)));
     }
 
     #[test]
-    fn inspect_parser_returns_only_bounded_operational_fields() {
-        let value = "abc123\t/checkout-api\trunning\tdemo\tweb\t<no value>\n";
-        let parsed = parse_inspect_output(value).unwrap();
-        assert_eq!(parsed.name, "checkout-api");
-        assert_eq!(parsed.compose_project.as_deref(), Some("demo"));
-        assert_eq!(parsed.compose_service.as_deref(), Some("web"));
-        assert!(!parsed.nopager_control_plane);
+    fn unavailable_helper_is_definitively_not_started() {
+        assert_eq!(
+            RuntimeHelperError::HelperUnavailable.mutation_disposition(),
+            MutationDisposition::NotStarted
+        );
+        assert_eq!(
+            RuntimeHelperError::ResponseTimeout {
+                mutation: MutationDisposition::Ambiguous
+            }
+            .mutation_disposition(),
+            MutationDisposition::Ambiguous
+        );
+        assert_eq!(
+            RuntimeHelperError::InvalidResponse {
+                mutation: MutationDisposition::Ambiguous
+            }
+            .mutation_disposition(),
+            MutationDisposition::Ambiguous
+        );
     }
 
-    #[test]
-    fn blocks_explicit_control_plane_label() {
-        let target = state("target", Some("customer"), true);
-        assert!(matches!(
-            ensure_safe_mutation_target(&target, None),
-            Err(DockerOperationsError::ControlPlaneTarget)
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mutating_response_timeout_is_ambiguous() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::UnixListener;
+
+        let directory = std::env::temp_dir().join(format!(
+            "nopager-runtime-client-timeout-{}",
+            std::process::id()
         ));
-    }
-
-    #[test]
-    fn blocks_same_compose_project_as_worker() {
-        let target = state("customer-app", Some("nopager"), false);
-        let worker = state("worker", Some("nopager"), true);
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("helper.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        });
+        let client = RuntimeHelperClient::new(
+            socket,
+            SecretString::from("a".repeat(32)),
+            Duration::from_millis(50),
+        )
+        .unwrap();
+        let error = client
+            .restart_container(Uuid::now_v7(), &"a".repeat(64))
+            .await
+            .unwrap_err();
         assert!(matches!(
-            ensure_safe_mutation_target(&target, Some(&worker)),
-            Err(DockerOperationsError::ControlPlaneTarget)
+            error,
+            RuntimeHelperError::ResponseTimeout {
+                mutation: MutationDisposition::Ambiguous
+            }
         ));
-    }
-
-    #[test]
-    fn allows_separate_customer_compose_project() {
-        let target = state("customer-app", Some("customer"), false);
-        let worker = state("worker", Some("nopager"), true);
-        assert!(ensure_safe_mutation_target(&target, Some(&worker)).is_ok());
-    }
-
-    #[test]
-    fn default_client_has_no_shell_or_model_command_surface() {
-        let client = DockerOperationsClient::for_test(Some("5f2a06e3f45b"));
-        assert_eq!(client.docker_program, "docker");
-        assert_eq!(client.self_container_hint.as_deref(), Some("5f2a06e3f45b"));
+        server.await.unwrap();
+        let _ = std::fs::remove_dir_all(&directory);
     }
 }

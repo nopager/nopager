@@ -16,6 +16,7 @@ nopager-db = { path = "../../crates/nopager-db" }
 nopager-monitor = { path = "../../crates/nopager-monitor" }
 nopager-policy = { path = "../../crates/nopager-policy" }
 nopager-providers = { path = "../../crates/nopager-providers" }
+nopager-runtime-protocol = { path = "../../crates/nopager-runtime-protocol" }
 nopager-sandbox = { path = "../../crates/nopager-sandbox" }
 secrecy.workspace = true
 serde_json.workspace = true

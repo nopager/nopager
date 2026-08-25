@@ -8,7 +8,7 @@ The self-hosted Alpha requires:
 
 - Docker Engine 26 or newer. NoPager's repair sandbox uses Docker's volume-subpath mount support, which was added in Engine 26;
 - Docker Compose v2;
-- a reachable Docker daemon and permission to use its socket;
+- permission for the host operator to use Docker; ordinary NoPager containers do not receive the socket;
 - `curl` or `wget` so quickstart can prove the API and console are actually ready before reporting success;
 - OpenSSL or Python 3 on first boot if NoPager needs to generate local secrets;
 - local ports 3000 and 8080 available unless you override `NOPAGER_WEB_PORT` and `NOPAGER_API_PORT`.
@@ -31,7 +31,7 @@ Quickstart creates `.env` if needed and generates three local secrets:
 
 It uses a private process umask and forces `.env` to mode `0600` on Unix so generated credentials are not readable by other local users. `nopager init` applies the same private-file rule.
 
-It then detects the Docker socket group, validates the rendered Compose configuration, starts the stack, and waits for both the API and web console to become ready.
+It generates a dedicated runtime-helper IPC credential, validates the rendered Compose configuration, starts the unprivileged stack, and waits for both API and console readiness. The ordinary quickstart does not install privileged mutation authority. The production-operations quickstart explicitly installs and enrolls the host helper.
 
 Open `http://localhost:3000/setup` and complete the GitHub, Vercel, AI-provider, health-check, and safety-mode checks.
 
@@ -50,6 +50,8 @@ private Docker network
    +-- NoPager API :8080
    +-- PostgreSQL :5432
    +-- Worker
+
+Host-only Unix socket: Worker -> nopager-runtime-helper -> Docker socket
 ```
 
 The Compose file places Web and PostgreSQL on separate Docker networks. Web can reach Server, Server bridges the frontend/backend networks, and Worker/PostgreSQL stay on the backend network. The one-shot workspace initializer runs with networking disabled.
@@ -80,6 +82,8 @@ Recommended minimum backup set:
 ```text
 .env
 PostgreSQL Docker volume
+/etc/nopager/runtime-helper.token and runtime-helper.json (for an enrolled operations install)
+/var/lib/nopager-runtime/requests (mutation audit journal)
 ```
 
 Store backups encrypted and outside the Docker host. Do not copy live provider secrets into issue reports or logs.
@@ -140,7 +144,9 @@ Do not delete the PostgreSQL volume or replace `NOPAGER_MASTER_KEY` as a trouble
 
 ## Security assumptions
 
-The worker is trusted and needs Docker daemon access to create isolated repair containers. Repair containers do not receive the Docker socket or provider credentials, run non-root, drop Linux capabilities, use a read-only root filesystem, and receive resource limits. Compromise of the trusted worker or Docker daemon remains a host-level security event; isolate the NoPager host accordingly.
+The ordinary worker is unprivileged: no Docker socket mount, Docker socket group, or Docker CLI. For the production-operations path, the separately installed helper is the trusted Docker boundary and can only inspect/restart one immutable enrolled target through its protocol. Helper or Docker-daemon compromise remains a host-level security event; isolate the host. See [`RUNTIME_HELPER_SECURITY.md`](RUNTIME_HELPER_SECURITY.md).
+
+The older deployment-repair sandbox code is not granted Docker create authority by this Design Partner runtime helper. This release's truthful real mutation scope is only `restart_container`; do not advertise local arbitrary repair-container execution as enabled by the helper.
 
 Health checks accept public HTTPS targets only and reject local/private/reserved address resolution to reduce SSRF risk. High-risk repository and infrastructure paths are deterministically blocked from automatic AI repair.
 
@@ -148,4 +154,4 @@ Container logs use bounded `json-file` rotation in the default Compose stack so 
 
 ## Alpha scope
 
-This runbook does not turn the Design Partner Alpha into a claim of broad production readiness. Before relying on autonomous remediation, complete the real GitHub + Vercel scenarios in [`DESIGN_PARTNER_ALPHA.md`](DESIGN_PARTNER_ALPHA.md), including Preview verification, production approval, failed-production rollback, and Kill Switch behavior.
+This runbook does not turn the Design Partner Alpha into a claim of broad production readiness. For the runtime-helper release, complete [`DESIGN_PARTNER_ACCEPTANCE.md`](DESIGN_PARTNER_ACCEPTANCE.md) on a disposable host and retain Safe Mode.

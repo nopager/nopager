@@ -30,20 +30,37 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
+      - run: cargo fmt --all -- --check
+      - run: cargo check --workspace --locked
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
       - name: Validate shell entrypoints
         run: |
           sh -n scripts/quickstart.sh
           sh -n scripts/operations-quickstart.sh
+          sh -n scripts/install-runtime-helper.sh
+          sh -n scripts/uninstall-runtime-helper.sh
+          sh -n scripts/design-partner-acceptance.sh
+          sh -n scripts/ci-runtime-boundary-smoke.sh
           sh -n scripts/create-dogfood-repo.sh
           sh -n scripts/test-create-dogfood-repo.sh
+      - name: Prove worker image definition has no Docker authority
+        run: |
+          ! grep -q '/var/run/docker.sock' docker-compose.yml
+          ! grep -Eq 'docker-cli|/usr/bin/docker' docker/worker.Dockerfile
+          ! grep -Eq 'Command::new|std::process::Command|tokio::process::Command' crates/nopager-connectors/src/docker_ops.rs
       - name: Exercise dogfood repository bootstrap safety
         run: sh scripts/test-create-dogfood-repo.sh
 
   self-host-smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.92.0 --profile minimal
+          rustup override set 1.92.0
       - name: Configure deterministic smoke environment
         run: |
           cp .env.example .env
@@ -102,18 +119,8 @@ jobs:
           socket.on('error', () => finish(0));
           setTimeout(() => finish(0), 3000);
           NODE
-      - name: Verify operations Docker runtime path
-        run: |
-          docker run -d --name nopager-ci-ops-target \
-            --label com.docker.compose.project=customer-ci \
-            alpine:3.22 sleep 600 >/dev/null
-          test "$(docker inspect --format '{{index .Config.Labels "com.nopager.control-plane"}}' nopager-ci-ops-target)" != "true"
-          test "$(docker compose exec -T worker docker container inspect --format '{{.State.Status}}' -- nopager-ci-ops-target)" = "running"
-          worker=$(docker compose ps -q worker)
-          worker_project=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$worker")
-          target_project=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' nopager-ci-ops-target)
-          test "$worker_project" != "$target_project"
-          docker rm -f nopager-ci-ops-target >/dev/null
+      - name: Prove the real Linux Docker privilege boundary
+        run: sh scripts/ci-runtime-boundary-smoke.sh
       - name: Verify Rust setup API
         run: curl --fail --show-error --silent http://127.0.0.1:8080/api/v1/setup/status >/dev/null
       - name: Verify web console and API proxy
@@ -172,7 +179,11 @@ jobs:
       - name: Tear down smoke stack
         if: always()
         run: |
-          docker rm -f nopager-ci-ops-target >/dev/null 2>&1 || true
+          test ! -f .runtime/ci-helper.pid || kill "$(cat .runtime/ci-helper.pid)" >/dev/null 2>&1 || true
+          for container in nopager-ci-ops-target nopager-ci-unenrolled nopager-ci-same-project \
+            nopager-ci-replaced nopager-ci-replaced-old; do
+            docker rm -f "$container" >/dev/null 2>&1 || true
+          done
           docker compose down -v --remove-orphans
 
   publish-images:

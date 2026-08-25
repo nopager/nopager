@@ -2,6 +2,16 @@
 
 This Alpha deliberately narrows NoPager around the first design-partner proof instead of adding breadth.
 
+## 0.2.0-design-partner.1 — bounded production operations
+
+- Removed the Docker socket, Docker group, and Docker CLI from the ordinary worker.
+- Added a Linux host runtime helper with a closed typed protocol for only inspect and `restart_container` against one immutable enrolled target.
+- Added independent helper checks for credentials/peer UID, control-plane labels and Compose identity, explicit denylist, target replacement, and enrollment drift.
+- Added a durable helper request journal: completed duplicates return cached results and ambiguous requests are never replayed.
+- Preserved Safe Mode, Kill Switch, persisted action ownership, cooldown, one execution attempt, and external HTTP plus container-state recovery verification.
+- Added formal threat model, security/evidence boundary, systemd install/revoke path, exact release version, full-loop acceptance runbook, failure/ambiguity tests, and CI proof that the worker cannot access Docker directly.
+- Kept the real production-operation scope to one mutation class. No shell, SSH, Cloudflare, database, Kubernetes, scaling, networking, image, or arbitrary Docker surface was added.
+
 ## Product behavior
 
 - Preview verification is a hard production gate. A failed or missing Preview cannot be overridden by approval.

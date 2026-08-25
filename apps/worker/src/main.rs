@@ -102,10 +102,11 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .json()
         .init();
-    info!("NoPager worker ready");
     let database_url = std::env::var("DATABASE_URL")?;
     let database = Database::connect(&database_url).await?;
     database.migrate().await?;
+    preflight_runtime_helper().await?;
+    info!("NoPager worker ready");
     let worker_id = format!("worker-{}", std::process::id());
 
     let mut scheduler = tokio::time::interval(Duration::from_secs(5));
@@ -143,6 +144,30 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+}
+
+async fn preflight_runtime_helper() -> anyhow::Result<()> {
+    if !std::env::var("NOPAGER_ALLOW_CONTAINER_RESTART").is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    }) {
+        return Ok(());
+    }
+    let target = std::env::var("NOPAGER_DOCKER_TARGET")?;
+    let state = nopager_connectors::docker_ops::RuntimeHelperClient::from_environment()?
+        .inspect_container(target.trim())
+        .await?;
+    if !state.running() {
+        anyhow::bail!("enrolled runtime-helper target is not running")
+    }
+    info!(
+        target_id = %state.id,
+        target_name = %state.name,
+        "runtime helper preflight passed without Docker authority in worker"
+    );
+    Ok(())
 }
 
 async fn execute_job(database: &Database, job: &Job) -> anyhow::Result<()> {

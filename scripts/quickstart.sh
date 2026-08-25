@@ -113,12 +113,18 @@ if [ -z "$current_admin_token" ]; then
   printf 'Generated NOPAGER_ADMIN_TOKEN for local CLI/operator access\n'
 fi
 
-docker_gid=$(docker run --rm -v /var/run/docker.sock:/sock alpine:3.22 stat -c '%g' /sock 2>/dev/null || true)
-if [ -n "$docker_gid" ]; then
-  set_env DOCKER_GID "$docker_gid"
-  printf 'Detected Docker socket group: %s\n' "$docker_gid"
-else
-  printf 'Warning: could not detect Docker socket group; keeping DOCKER_GID from .env.\n' >&2
+current_runtime_token=$(read_env NOPAGER_RUNTIME_HELPER_TOKEN)
+if [ -z "$current_runtime_token" ]; then
+  set_env NOPAGER_RUNTIME_HELPER_TOKEN "$(generate_secret)"
+  printf 'Generated dedicated runtime-helper IPC credential\n'
+fi
+
+runtime_socket_dir=$(read_env NOPAGER_RUNTIME_SOCKET_DIR)
+runtime_socket_dir=${runtime_socket_dir:-./.runtime/ipc}
+if [ ! -d "$runtime_socket_dir" ]; then
+  mkdir -p "$runtime_socket_dir" \
+    || fail "runtime-helper socket directory could not be created: $runtime_socket_dir"
+  chmod 750 "$runtime_socket_dir"
 fi
 
 web_port=$(read_env NOPAGER_WEB_PORT)
