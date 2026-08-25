@@ -90,6 +90,7 @@ while True:
     chunks.append(chunk)
 print(b''.join(chunks).decode())
 PY
+chmod 0444 .runtime/helper-client.py
 
 client_request() {
   action=$1
