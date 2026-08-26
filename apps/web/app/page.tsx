@@ -1,145 +1,181 @@
 import Link from "next/link";
-import {
-  Card,
-  IncidentLink,
-  PageHeader,
-  SectionTitle,
-  StatusBadge,
-} from "@/components/ui";
-import { api, type Overview } from "@/lib/api";
+import { Card, IncidentLink, PageHeader, StatusBadge } from "@/components/ui";
+import { api, type IncidentSummary, type Overview } from "@/lib/api";
 import { projectIncidentState } from "@/lib/model";
+import { apiDate, humanize } from "@/lib/presentation";
 
 export default async function OverviewPage() {
-  const overview = await api<Overview>("overview");
-  if (!overview?.configured)
+  const [overview, incidentResult] = await Promise.all([
+    api<Overview>("overview"),
+    api<{ incidents: IncidentSummary[] }>("incidents"),
+  ]);
+  if (!overview?.configured) {
     return (
-      <div className="page">
+      <div className="page overview-page">
         <PageHeader
-          eyebrow="Production overview"
+          eyebrow="Overview"
           title="Protect your first app"
-          description="Complete setup to start 24/7 production protection."
+          description="Complete setup to begin bounded production monitoring in Safe Mode."
           action={
             <Link className="primary-button link-button" href="/setup">
               Open setup
             </Link>
           }
         />
-        <Card>
-          <p>The NoPager API is waiting for a protected app.</p>
+        <Card className="empty-brief">
+          <span className="empty-brief-mark">N</span>
+          <div>
+            <h2>No protected service yet</h2>
+            <p>The NoPager API is waiting for one protected application.</p>
+          </div>
         </Card>
       </div>
     );
+  }
+
+  const incidents = incidentResult?.incidents.slice(0, 4) ?? [];
+  const unresolvedAttention = incidents.some(
+    (incident) =>
+      incident.actionRequired ||
+      incident.status === "WAITING_APPROVAL" ||
+      incident.status === "ESCALATED" ||
+      incident.status === "FAILED",
+  );
   const healthy =
-    overview.systemStatus === "HEALTHY" && !overview.actionRequired;
+    overview.systemStatus === "HEALTHY" &&
+    !overview.actionRequired &&
+    !unresolvedAttention;
+
   return (
-    <div className="page">
+    <div className="page overview-page">
       <PageHeader
-        eyebrow="Production overview"
-        title={`System Status: ${display(overview.systemStatus)}`}
-        description={
-          healthy
-            ? `No action needed. ${checked(overview.lastCheckedAt)}`
-            : "Review the current production state."
-        }
+        eyebrow="Overview"
+        title="Production protection"
+        description="A concise operating brief. NoPager stays quiet until a decision or recovery needs your attention."
         action={
-          <span className={healthy ? "healthy-pill" : "status-badge waiting"}>
+          <span className={healthy ? "health-state" : "health-state attention"}>
             <span />
-            {healthy ? "All systems operational" : "Attention needed"}
+            {healthy ? "Protected" : "Attention required"}
           </span>
         }
       />
-      <Card className="hero-status">
-        <div className="status-orb">{healthy ? "✓" : "!"}</div>
-        <div>
-          <p className="eyebrow">{overview.project?.name} PRODUCTION</p>
+
+      <section className={`executive-brief${healthy ? " healthy" : ""}`}>
+        <div className="brief-mark" aria-hidden="true">
+          {healthy ? "✓" : "!"}
+        </div>
+        <div className="brief-copy">
+          <p className="eyebrow">Current posture</p>
           <h2>
-            {overview.protectionPaused
-              ? "Protection is paused."
-              : "Your app is protected."}
+            {healthy
+              ? "All systems protected. No action required."
+              : overview.protectionPaused
+                ? "Protection actions are paused."
+                : "A production incident needs attention."}
           </h2>
           <p>
-            NoPager monitors production signals and health checks around the
-            clock, then wakes AI operations reasoning only when an incident
-            needs attention.
+            {healthy
+              ? "NoPager is on watch."
+              : "Review the latest incident before production changes."}
           </p>
         </div>
-        <div className="status-metric">
-          <strong>{display(overview.protectionMode ?? "safe")}</strong>
-          <span>Protection mode</span>
+        <div className="brief-check">
+          <span>Last checked</span>
+          <strong>{formatChecked(overview.lastCheckedAt)}</strong>
         </div>
-      </Card>
-      <div className="metric-grid">
-        <Card>
-          <p className="metric-label">Protection</p>
-          <strong className="metric-value green">
-            {overview.protectionPaused ? "Paused" : "Active"}
-          </strong>
-          <p>
-            {display(overview.protectionMode ?? "safe")} ·{" "}
-            {overview.healthCheckCount ?? 0} health checks
-          </p>
-        </Card>
-        <Card>
-          <p className="metric-label">Latest deployment</p>
-          <strong className="metric-value">
-            {overview.latestDeployment
-              ? display(overview.latestDeployment.status)
-              : "Not required"}
-          </strong>
-          <p>
-            {overview.latestDeployment
-              ? new Date(overview.latestDeployment.createdAt).toLocaleString()
-              : "Operations protection can run without a deployment provider"}
-          </p>
-        </Card>
-        <Card>
-          <p className="metric-label">Incidents this month</p>
-          <strong className="metric-value">
-            {overview.incidentsThisMonth ?? 0}
-          </strong>
-          <p>{overview.autonomousThisMonth ?? 0} resolved autonomously</p>
-        </Card>
-      </div>
-      <Card>
-        <SectionTitle
-          title="Latest incident"
-          detail={
-            overview.latestIncident
-              ? "Most recent production event"
-              : "Quiet is good."
-          }
-        />
-        {overview.latestIncident ? (
-          <div className="activity-row">
-            <span className="timeline-dot blue-dot" />
+      </section>
+
+      <div className="overview-columns">
+        <section className="overview-section">
+          <div className="overview-section-head">
             <div>
-              <strong>{overview.latestIncident.title}</strong>
-              <p>{overview.latestIncident.severity} severity</p>
-              <IncidentLink id={overview.latestIncident.id}>
-                Review incident
-              </IncidentLink>
+              <p className="eyebrow">Protected services</p>
+              <h2>Coverage</h2>
             </div>
-            <StatusBadge
-              state={projectIncidentState(overview.latestIncident.status)}
-            />
+            <span>1 service</span>
           </div>
-        ) : (
-          <p className="muted">No incidents recorded.</p>
-        )}
-      </Card>
+          <div className="service-row">
+            <span className={`service-status${healthy ? " healthy" : ""}`} />
+            <div className="service-name">
+              <strong>
+                {overview.project?.name ?? "Protected application"}
+              </strong>
+              <span>Production</span>
+            </div>
+            <dl className="service-facts">
+              <div>
+                <dt>Protection</dt>
+                <dd>{overview.protectionPaused ? "Paused" : "Active"}</dd>
+              </div>
+              <div>
+                <dt>Mode</dt>
+                <dd>{humanize(overview.protectionMode ?? "safe")}</dd>
+              </div>
+              <div>
+                <dt>Signals</dt>
+                <dd>{overview.healthCheckCount ?? 0} health checks</dd>
+              </div>
+            </dl>
+          </div>
+        </section>
+
+        <section className="overview-section recent-section">
+          <div className="overview-section-head">
+            <div>
+              <p className="eyebrow">Recent incidents</p>
+              <h2>Decision history</h2>
+            </div>
+            <Link className="text-link" href="/incidents">
+              View all →
+            </Link>
+          </div>
+          {incidents.length ? (
+            <div className="recent-list">
+              {incidents.map((incident) => (
+                <article className="recent-row" key={incident.id}>
+                  <div>
+                    <strong>{incident.title}</strong>
+                    <span>
+                      {humanize(incident.severity)} ·{" "}
+                      {formatDate(incident.openedAt)}
+                    </span>
+                  </div>
+                  <StatusBadge state={projectIncidentState(incident.status)} />
+                  <IncidentLink id={incident.id}>Review</IncidentLink>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <div className="quiet-history">
+              <span aria-hidden="true">✓</span>
+              <p>No incidents recorded. Quiet is the expected state.</p>
+            </div>
+          )}
+        </section>
+      </div>
     </div>
   );
 }
 
-function display(value: string) {
-  return value
-    .toLowerCase()
-    .replaceAll("_", " ")
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+function formatChecked(value?: unknown) {
+  if (!value) return "First check pending";
+  const date = apiDate(value);
+  if (!date) return "Check time unavailable";
+  return new Intl.DateTimeFormat("en", {
+    hour: "numeric",
+    minute: "2-digit",
+    month: "short",
+    day: "numeric",
+  }).format(date);
 }
 
-function checked(value?: string | null) {
-  return value
-    ? `Last checked ${new Date(value).toLocaleString()}.`
-    : "First health check pending.";
+function formatDate(value: unknown) {
+  const date = apiDate(value);
+  if (!date) return "Time unavailable";
+  return new Intl.DateTimeFormat("en", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(date);
 }

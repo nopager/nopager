@@ -3,35 +3,28 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
-type ApprovalKind = "deployment" | "operation";
-
-export function ApproveButton({
+export function ApprovalActions({
   incidentId,
-  kind = "deployment",
+  actionKind,
 }: {
   incidentId: string;
-  kind?: ApprovalKind;
+  actionKind: string;
 }) {
   const router = useRouter();
+  const [intent, setIntent] = useState<"approve" | "deny" | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const operation = kind === "operation";
+  const restart = actionKind === "restart_container";
+  const approveLabel = restart
+    ? "Approve restart"
+    : "Approve production deploy";
 
-  async function approve() {
-    if (
-      !window.confirm(
-        operation
-          ? "Approve this bounded production operation? NoPager will execute only the persisted configured action, then independently verify production health."
-          : "Promote this verified repair to production? NoPager will verify production health and roll back if verification fails.",
-      )
-    ) {
-      return;
-    }
+  async function submit(decision: "approve" | "reject") {
     setBusy(true);
     setError("");
     try {
       const response = await fetch(
-        `/api/nopager/incidents/${encodeURIComponent(incidentId)}/approve`,
+        `/api/nopager/incidents/${encodeURIComponent(incidentId)}/${decision}`,
         { method: "POST" },
       );
       if (response.ok) {
@@ -41,73 +34,90 @@ export function ApproveButton({
       const body = (await response.json().catch(() => ({}))) as {
         error?: string;
       };
-      setError(body.error?.replaceAll("_", " ") ?? "Approval failed");
+      setError(body.error?.replaceAll("_", " ") ?? `${decision} failed`);
     } catch {
-      setError("Approval request could not reach NoPager.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <>
-      <button className="primary-button wide" disabled={busy} onClick={approve}>
-        {busy
-          ? "Approving…"
-          : operation
-            ? "Approve operation"
-            : "Approve production deploy"}
-      </button>
-      {error && <p className="form-error">{error}</p>}
-    </>
-  );
-}
-
-export function RejectButton({
-  incidentId,
-  kind = "deployment",
-}: {
-  incidentId: string;
-  kind?: ApprovalKind;
-}) {
-  const router = useRouter();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const operation = kind === "operation";
-
-  async function reject() {
-    setBusy(true);
-    setError("");
-    try {
-      const response = await fetch(
-        `/api/nopager/incidents/${encodeURIComponent(incidentId)}/reject`,
-        { method: "POST" },
+      setError(
+        "The request could not reach NoPager. No decision was recorded.",
       );
-      if (response.ok) {
-        router.refresh();
-        return;
-      }
-      const body = (await response.json().catch(() => ({}))) as {
-        error?: string;
-      };
-      setError(body.error?.replaceAll("_", " ") ?? "Rejection failed");
-    } catch {
-      setError("Rejection request could not reach NoPager.");
     } finally {
       setBusy(false);
     }
   }
 
-  return (
-    <>
-      <button
-        className="secondary-button wide"
-        disabled={busy}
-        onClick={reject}
+  if (intent) {
+    const approving = intent === "approve";
+    return (
+      <div
+        className="approval-confirm"
+        role="alertdialog"
+        aria-label={
+          approving ? "Approve bounded action" : "Deny bounded action"
+        }
+        aria-live="polite"
       >
-        {busy ? "Rejecting…" : operation ? "Reject operation" : "Reject repair"}
+        <strong>
+          {approving ? "Grant this bounded authority?" : "Deny this action?"}
+        </strong>
+        <p>
+          {approving
+            ? "This permits one execution attempt against the exact target above. Verification must still pass."
+            : "NoPager will record the denial and will not execute this proposed action."}
+        </p>
+        <div className="approval-confirm-actions">
+          <button
+            type="button"
+            className={approving ? "primary-button" : "secondary-button"}
+            disabled={busy}
+            onClick={() => submit(approving ? "approve" : "reject")}
+          >
+            {busy ? "Recording…" : approving ? approveLabel : "Deny action"}
+          </button>
+          <button
+            type="button"
+            className="quiet-button"
+            disabled={busy}
+            onClick={() => setIntent(null)}
+          >
+            Cancel
+          </button>
+        </div>
+        {error ? (
+          <p className="form-error" role="alert">
+            {error}
+          </p>
+        ) : null}
+      </div>
+    );
+  }
+
+  return (
+    <div className="approval-actions">
+      <button
+        type="button"
+        className="primary-button"
+        onClick={() => setIntent("approve")}
+      >
+        {approveLabel}
       </button>
-      {error && <p className="form-error">{error}</p>}
-    </>
+      <button
+        type="button"
+        className="secondary-button"
+        onClick={() => setIntent("deny")}
+      >
+        Deny
+      </button>
+      <button
+        type="button"
+        className="quiet-button"
+        disabled
+        title="Manual escalation is not exposed by this Alpha control plane"
+      >
+        Escalate
+      </button>
+      <small>
+        Escalation is automatic on unsafe or unverifiable outcomes; manual
+        escalation is not available from this Alpha console.
+      </small>
+    </div>
   );
 }

@@ -1,5 +1,5 @@
 import Link from "next/link";
-import type { ReactNode } from "react";
+import type { ComponentPropsWithoutRef, ReactNode } from "react";
 import type { UiIncidentState } from "@/lib/model";
 
 export function PageHeader({
@@ -28,11 +28,13 @@ export function PageHeader({
 export function Card({
   children,
   className = "",
-}: {
-  children: ReactNode;
-  className?: string;
-}) {
-  return <section className={`card ${className}`}>{children}</section>;
+  ...props
+}: ComponentPropsWithoutRef<"section">) {
+  return (
+    <section className={`card ${className}`} {...props}>
+      {children}
+    </section>
+  );
 }
 
 export function StatusBadge({ state }: { state: UiIncidentState }) {
